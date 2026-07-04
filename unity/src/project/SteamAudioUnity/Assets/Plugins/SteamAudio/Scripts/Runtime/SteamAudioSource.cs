@@ -258,6 +258,7 @@ namespace SteamAudio
             }
         }
 
+#if UNITY_EDITOR
         private void OnDrawGizmosSelected()
         {
             if (directivity && directivityInput == DirectivityInput.SimulationDefined && dipoleWeight > 0.0f)
@@ -274,7 +275,94 @@ namespace SteamAudio
                 Gizmos.DrawWireMesh(mDeformedSphereMesh, transform.position, transform.rotation);
                 Gizmos.color = oldColor;
             }
+
+            if (occlusion && occlusionInput == OcclusionInput.SimulationDefined)
+            {
+                DrawOcclusionVisualizer();
+            }
         }
+
+        private int mCachedSampleCount = -1;
+        private UnityEngine.Vector3[] mCachedVolumeSamples = null;
+
+        private void DrawOcclusionVisualizer()
+        {
+            Transform listenerTransform;
+            if (Application.isPlaying)
+            {
+                var listener = SteamAudioManager.GetSteamAudioListener();
+                listenerTransform = listener != null ? listener.transform : null;
+            }
+            else
+            {
+                listenerTransform = Camera.main != null ? Camera.main.transform : null;
+            }
+
+            if (listenerTransform == null)
+                return;
+
+            UnityEngine.Vector3 listenerPos = listenerTransform.position;
+            UnityEngine.Vector3 sourcePos = transform.position;
+
+            var layerMask = SteamAudioSettings.Singleton.layerMask;
+
+            if (occlusionType == OcclusionType.Raycast)
+            {
+                UnityEngine.Vector3 direction = sourcePos - listenerPos;
+                bool isOccluded = Physics.Raycast(listenerPos, direction.normalized, direction.magnitude, layerMask);
+
+                Gizmos.color = isOccluded ? Color.red : Color.green;
+                Gizmos.DrawLine(listenerPos, sourcePos);
+            }
+            // Referencing DirectSimulator::volumetricOcclusion
+            else if (occlusionType == OcclusionType.Volumetric)
+            {
+                Gizmos.color = new Color(0f, 1f, 1f, 0.2f);
+                Gizmos.DrawWireSphere(sourcePos, occlusionRadius);
+
+                int actualSamples = Mathf.Min(occlusionSamples, SteamAudioSettings.Singleton.maxOcclusionSamples);
+
+                // Update cached samples only if the sample count has changed
+                if (mCachedSampleCount != actualSamples || mCachedVolumeSamples == null || mCachedVolumeSamples.Length != actualSamples)
+                {
+                    mCachedSampleCount = actualSamples;
+                    mCachedVolumeSamples = new UnityEngine.Vector3[actualSamples];
+                    Sampling.GenerateSphereVolumeSamples(actualSamples, mCachedVolumeSamples);
+                }
+
+                for (int i = 0; i < mCachedVolumeSamples.Length; i++)
+                {
+                    UnityEngine.Vector3 targetPoint = Sampling.TransformSphereVolumeSample(mCachedVolumeSamples[i], sourcePos, occlusionRadius);
+
+                    // If the sample is discarded (sample's path to audio source is obstructed)
+                    UnityEngine.Vector3 sourceToTarget = targetPoint - sourcePos;
+                    float sourceToTargetMag = sourceToTarget.magnitude;
+
+                    if (sourceToTargetMag > 1e-5f && Physics.Raycast(sourcePos, sourceToTarget.normalized, sourceToTargetMag, layerMask))
+                    {
+                        Gizmos.color = Color.yellow;
+                        Gizmos.DrawLine(sourcePos, targetPoint);
+                        Gizmos.DrawLine(listenerPos, targetPoint);
+                        Gizmos.DrawSphere(targetPoint, 0.025f);
+                        continue;
+                    }
+
+                    UnityEngine.Vector3 listenerToTarget = targetPoint - listenerPos;
+                    float listenerToTargetMag = listenerToTarget.magnitude;
+                    bool isOccluded = false;
+
+                    if (listenerToTargetMag > 1e-5f)
+                    {
+                        isOccluded = Physics.Raycast(listenerPos, listenerToTarget.normalized, listenerToTargetMag, layerMask);
+                    }
+
+                    Gizmos.color = isOccluded ? Color.red : Color.green;
+                    Gizmos.DrawLine(listenerPos, targetPoint);
+                    Gizmos.DrawSphere(targetPoint, 0.025f);
+                }
+            }
+        }
+#endif
 
         public void SetInputs(SimulationFlags flags)
         {
