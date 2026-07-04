@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace SteamAudio
 {
-    public static class Sampling
+    internal static class Sampling
     {
         // Sampling::generateSphereVolumeSamples
         public static void GenerateSphereVolumeSamples(int numSamples, UnityEngine.Vector3[] samples)
