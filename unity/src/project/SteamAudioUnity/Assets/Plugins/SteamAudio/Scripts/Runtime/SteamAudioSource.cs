@@ -317,7 +317,7 @@ namespace SteamAudio
             // Referencing DirectSimulator::volumetricOcclusion
             else if (occlusionType == OcclusionType.Volumetric)
             {
-                Gizmos.color = new Color(0f, 1f, 1f, 0.2f);
+                Gizmos.color = Color.cyan;
                 Gizmos.DrawWireSphere(sourcePos, occlusionRadius);
 
                 int actualSamples = Mathf.Min(occlusionSamples, SteamAudioSettings.Singleton.maxOcclusionSamples);
@@ -338,13 +338,19 @@ namespace SteamAudio
                     UnityEngine.Vector3 sourceToTarget = targetPoint - sourcePos;
                     float sourceToTargetMag = sourceToTarget.magnitude;
 
-                    if (sourceToTargetMag > 1e-5f && Physics.Raycast(sourcePos, sourceToTarget.normalized, sourceToTargetMag, layerMask))
+                    if (sourceToTargetMag > 1e-5f)
                     {
-                        Gizmos.color = Color.yellow;
-                        Gizmos.DrawLine(sourcePos, targetPoint);
-                        Gizmos.DrawLine(listenerPos, targetPoint);
-                        Gizmos.DrawSphere(targetPoint, 0.025f);
-                        continue;
+                        bool blockedSourceToTarget = Physics.Raycast(sourcePos, sourceToTarget.normalized, sourceToTargetMag, layerMask);
+                        bool blockedTargetToSource = Physics.Raycast(targetPoint, -sourceToTarget.normalized, sourceToTargetMag, layerMask);
+
+                        if (blockedSourceToTarget || blockedTargetToSource)
+                        {
+                            Gizmos.color = Color.grey;
+                            Gizmos.DrawLine(sourcePos, targetPoint);
+                            Gizmos.DrawLine(listenerPos, targetPoint);
+                            Gizmos.DrawSphere(targetPoint, 0.025f);
+                            continue;
+                        }
                     }
 
                     UnityEngine.Vector3 listenerToTarget = targetPoint - listenerPos;
