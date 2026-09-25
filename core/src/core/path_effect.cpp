@@ -15,9 +15,9 @@
 //
 
 #include "path_effect.h"
-
 #include "array_math.h"
 #include "sh.h"
+#include "bands.h"
 
 namespace ipl {
 
@@ -29,10 +29,25 @@ PathEffect::PathEffect(const AudioSettings& audioSettings,
     const PathEffectSettings& effectSettings)
     : mMaxOrder(effectSettings.maxOrder)
     , mSpatialize(effectSettings.spatialize)
-    , mEQBuffer(1, audioSettings.frameSize)
-    , mEQEffect(audioSettings)
     , mPrevBinaural(false)
 {
+    // initialize crossover filters
+    IIR filters[Bands::kNumBands];
+    IIR::bandFilters(filters, audioSettings.samplingRate);
+
+    for (int i = 0; i < Bands::kNumBands; ++i)
+    {
+        mCrossover[i].setFilter(filters[i]);
+        mBandBuffers[i] = make_unique<AudioBuffer>(1, audioSettings.frameSize);
+    }
+
+    // scratch buffer for the max possible channels
+    int maxOutChannels = std::max(2, SphericalHarmonics::numCoeffsForOrder(effectSettings.maxOrder));
+    if (effectSettings.speakerLayout) {
+        maxOutChannels = std::max(maxOutChannels, effectSettings.speakerLayout->numSpeakers);
+    }
+    mTempBuffer = make_unique<AudioBuffer>(maxOutChannels, audioSettings.frameSize);
+
     if (mSpatialize)
     {
         AmbisonicsRotateEffectSettings ambisonicsRotateSettings{};
@@ -46,36 +61,53 @@ PathEffect::PathEffect(const AudioSettings& audioSettings,
 
         mAmbisonicsPanningEffect = make_unique<AmbisonicsPanningEffect>(audioSettings, ambisonicsPanningSettings);
 
-        mGainEffects.resize(effectSettings.speakerLayout->numSpeakers);
-        for (auto i = 0u; i < mGainEffects.size(0); ++i)
-        {
-            mGainEffects[i] = make_unique<GainEffect>(audioSettings);
-        }
-
         OverlapAddConvolutionEffectSettings overlapAddSettings{};
         overlapAddSettings.numChannels = IHRTFMap::kNumEars;
         overlapAddSettings.irSize = effectSettings.hrtf->numSamples();
 
-        mOverlapAddEffect = make_unique<OverlapAddConvolutionEffect>(audioSettings, overlapAddSettings);
-
         mAmbisonicsBuffer = make_unique<AudioBuffer>(SphericalHarmonics::numCoeffsForOrder(effectSettings.maxOrder), 1);
         mSpeakerBuffer = make_unique<AudioBuffer>(effectSettings.speakerLayout->numSpeakers, 1);
 
-        mHRTF.resize(2, effectSettings.hrtf->numSpectrumSamples());
+        for (int i = 0; i < Bands::kNumBands; ++i)
+        {
+            mOverlapAddEffects[i] = make_unique<OverlapAddConvolutionEffect>(audioSettings, overlapAddSettings);
+            mHRTF[i].resize(2, effectSettings.hrtf->numSpectrumSamples());
+
+            for (int j = 0; j < effectSettings.speakerLayout->numSpeakers; ++j)
+            {
+                mGainEffectsPan[i].push_back(make_unique<GainEffect>(audioSettings));
+            }
+        }
     }
     else
     {
-        mGainEffects.resize(SphericalHarmonics::numCoeffsForOrder(effectSettings.maxOrder));
-        for (auto i = 0u; i < mGainEffects.size(0); ++i)
+        int numCoeffs = SphericalHarmonics::numCoeffsForOrder(effectSettings.maxOrder);
+        for (int i = 0; i < Bands::kNumBands; ++i)
         {
-            mGainEffects[i] = make_unique<GainEffect>(audioSettings);
+            for (int j = 0; j < numCoeffs; ++j)
+            {
+                mGainEffectsRaw[i].push_back(make_unique<GainEffect>(audioSettings));
+            }
         }
     }
 }
 
 void PathEffect::reset()
 {
-    mEQEffect.reset();
+    for (int i = 0; i < Bands::kNumBands; ++i)
+    {
+        mCrossover[i].reset();
+        
+        if (mSpatialize)
+        {
+            mOverlapAddEffects[i]->reset();
+            for (auto& gain : mGainEffectsPan[i]) gain->reset();
+        }
+        else
+        {
+            for (auto& gain : mGainEffectsRaw[i]) gain->reset();
+        }
+    }
 
     if (mSpatialize)
     {
@@ -83,23 +115,9 @@ void PathEffect::reset()
         mAmbisonicsPanningEffect->reset();
     }
 
-    for (auto i = 0u; i < mGainEffects.size(0); ++i)
-    {
-        mGainEffects[i]->reset();
-    }
-
-    if (mSpatialize)
-    {
-        mOverlapAddEffect->reset();
-    }
-
     mPrevBinaural = false;
 }
 
-// Rendering the SH and EQ coefficients for pathing involves the following steps:
-//
-// 1. EQ is applied to the dry audio.
-// 2. The EQ-filtered audio is scaled by each SH coefficient in turn and combined into an Ambisonics buffer.
 AudioEffectState PathEffect::apply(const PathEffectParams& params,
                                    const AudioBuffer& in,
                                    AudioBuffer& out)
@@ -109,152 +127,155 @@ AudioEffectState PathEffect::apply(const PathEffectParams& params,
 
     out.makeSilent();
 
+    // process crossover into 3 frequency bands
+    for (int i = 0; i < Bands::kNumBands; ++i)
+    {
+        mCrossover[i].apply(in.numSamples(), in[0], (*mBandBuffers[i])[0]);
+    }
+
+    int numCoeffs = SphericalHarmonics::numCoeffsForOrder(params.order);
+    AudioEffectState state = AudioEffectState::TailComplete;
+
+    // stack-allocated wrapper around the temp buffer so AudioBuffer::mix won't assert.
+    float* channelPointers[32]; // accommodate max out channels
+    for (int i = 0; i < out.numChannels(); ++i) channelPointers[i] = (*mTempBuffer)[i];
+    AudioBuffer subTempBuffer(out.numChannels(), out.numSamples(), channelPointers);
+
     if (mSpatialize)
     {
-        // todo: assert?
-
-        // apply eq to mono input
-        EQEffectParams eqParams{};
-        eqParams.gains = params.eqCoeffs;
-
-        float eqGains[Bands::kNumBands] = {0};
-        if (params.normalizeEQ)
+        for (int band = 0; band < Bands::kNumBands; ++band)
         {
-            memcpy(eqGains, params.eqCoeffs, Bands::kNumBands * sizeof(float));
+            const float* bandSH = &params.shCoeffs[band * numCoeffs];
 
-            auto overallGain = 1.0f;
-            EQEffect::normalizeGains(eqGains, overallGain);
+            // load SH coeffs for this band
+            for (int i = 0; i < numCoeffs; ++i)
+                (*mAmbisonicsBuffer)[i][0] = bandSH[i];
 
-            eqParams.gains = eqGains;
-        }
+            // rotate SH coefficients for player orientation
+            AmbisonicsRotateEffectParams rotateParams{};
+            rotateParams.orientation = params.listener;
+            rotateParams.order = params.order;
+            mAmbisonicsRotateEffect->apply(rotateParams, *mAmbisonicsBuffer, *mAmbisonicsBuffer);
 
-        mEQEffect.apply(eqParams, in, mEQBuffer);
+            subTempBuffer.makeSilent();
 
-        for (auto i = 0; i < SphericalHarmonics::numCoeffsForOrder(params.order); ++i)
-        {
-            (*mAmbisonicsBuffer)[i][0] = params.shCoeffs[i];
-        }
-
-        // rotate the sh coeffs
-        AmbisonicsRotateEffectParams ambisonicsRotateParams{};
-        ambisonicsRotateParams.orientation = params.listener;
-        ambisonicsRotateParams.order = params.order;
-
-        mAmbisonicsRotateEffect->apply(ambisonicsRotateParams, *mAmbisonicsBuffer, *mAmbisonicsBuffer);
-
-        if (params.binaural)
-        {
-            // blend hrtf
-            memset(mHRTF.flatData(), 0, mHRTF.totalSize() * sizeof(complex_t));
-
-            auto cosine = cosf((137.9f * Math::kDegreesToRadians) / (params.order + 1.51f));
-            for (auto l = 0, i = 0; l <= params.order; ++l)
+            if (params.binaural)
             {
-                auto scalar = SphericalHarmonics::legendre(l, cosine);
-                for (auto m = -l; m <= l; ++m, ++i)
-                {
-                    const complex_t* hrtfForChannel[2] = {nullptr, nullptr};
-                    params.hrtf->ambisonicsHRTF(i, hrtfForChannel);
+                // collapse 16-channel HRTF into 2-channel binaural HRIR using SH
+                memset(mHRTF[band].flatData(), 0, mHRTF[band].totalSize() * sizeof(complex_t));
+                auto cosine = cosf((137.9f * Math::kDegreesToRadians) / (params.order + 1.51f));
 
-                    for (auto k = 0; k < IHRTFMap::kNumEars; ++k)
+                for (auto l = 0, i = 0; l <= params.order; ++l)
+                {
+                    auto scalar = SphericalHarmonics::legendre(l, cosine);
+                    for (auto m = -l; m <= l; ++m, ++i)
                     {
-                        ArrayMath::scaleAccumulate(params.hrtf->numSpectrumSamples(),
-                            reinterpret_cast<const float*>(hrtfForChannel[k]),
-                            scalar * (*mAmbisonicsBuffer)[i][0],
-                            reinterpret_cast<float*>(mHRTF[k]));
+                        const complex_t* hrtfForChannel[2] = {nullptr, nullptr};
+                        params.hrtf->ambisonicsHRTF(i, hrtfForChannel);
+
+                        for (auto k = 0; k < IHRTFMap::kNumEars; ++k)
+                        {
+                            ArrayMath::scaleAccumulate(params.hrtf->numSpectrumSamples(),
+                                reinterpret_cast<const float*>(hrtfForChannel[k]),
+                                scalar * (*mAmbisonicsBuffer)[i][0],
+                                reinterpret_cast<float*>(mHRTF[band][k]));
+                        }
                     }
                 }
+
+                // convolve mono input with combined HRIR
+                OverlapAddConvolutionEffectParams overlapAddParams{};
+                overlapAddParams.fftIR = mHRTF[band].data();
+                
+                auto bandState = mOverlapAddEffects[band]->apply(overlapAddParams, *mBandBuffers[band], subTempBuffer);
+                if (bandState == AudioEffectState::TailRemaining) state = AudioEffectState::TailRemaining;
+                
+                AudioBuffer::mix(subTempBuffer, out);
+                mPrevBinaural = true;
             }
-
-            // convolve with blended hrtf
-            OverlapAddConvolutionEffectParams overlapAddParams{};
-            overlapAddParams.fftIR = mHRTF.data();
-
-            mPrevBinaural = true;
-
-            return mOverlapAddEffect->apply(overlapAddParams, mEQBuffer, out);
-        }
-        else
-        {
-            // project sh coeffs to speaker layout
-            AmbisonicsPanningEffectParams ambisonicsPanningParams{};
-            ambisonicsPanningParams.order = params.order;
-
-            mAmbisonicsPanningEffect->apply(ambisonicsPanningParams, *mAmbisonicsBuffer, *mSpeakerBuffer);
-
-            // generate a panned output signal
-            for (auto i = 0; i < out.numChannels(); ++i)
+            else
             {
-                AudioBuffer outChannel(out, i);
+                AmbisonicsPanningEffectParams panParams{};
+                panParams.order = params.order;
+                mAmbisonicsPanningEffect->apply(panParams, *mAmbisonicsBuffer, *mSpeakerBuffer);
 
-                GainEffectParams gainParams{};
-                gainParams.gain = (*mSpeakerBuffer)[i][0];
+                for (int i = 0; i < out.numChannels(); ++i)
+                {
+                    AudioBuffer outChannel(subTempBuffer, i);
+                    GainEffectParams gainParams{};
+                    gainParams.gain = (*mSpeakerBuffer)[i][0];
 
-                mGainEffects[i]->apply(gainParams, mEQBuffer, outChannel);
+                    mGainEffectsPan[band][i]->apply(gainParams, *mBandBuffers[band], outChannel);
+                }
+                
+                AudioBuffer::mix(subTempBuffer, out);
+                mPrevBinaural = false;
             }
-
-            mPrevBinaural = false;
-
-            return AudioEffectState::TailComplete;
         }
     }
     else
     {
-        assert(out.numChannels() == SphericalHarmonics::numCoeffsForOrder(mMaxOrder));
-
-        EQEffectParams eqParams{};
-        eqParams.gains = params.eqCoeffs;
-
-        mEQEffect.apply(eqParams, in, mEQBuffer);
-
-        auto numChannels = SphericalHarmonics::numCoeffsForOrder(params.order);
-
-        for (auto i = 0; i < numChannels; ++i)
+        for (int band = 0; band < Bands::kNumBands; ++band)
         {
-            AudioBuffer outChannel(out, i);
+            subTempBuffer.makeSilent();
+            const float* bandSH = &params.shCoeffs[band * numCoeffs];
 
-            GainEffectParams gainParams{};
-            gainParams.gain = params.shCoeffs[i];
+            for (int i = 0; i < numCoeffs; ++i)
+            {
+                AudioBuffer outChannel(subTempBuffer, i);
+                GainEffectParams gainParams{};
+                gainParams.gain = bandSH[i];
 
-            mGainEffects[i]->apply(gainParams, mEQBuffer, outChannel);
+                mGainEffectsRaw[band][i]->apply(gainParams, *mBandBuffers[band], outChannel);
+            }
+            
+            AudioBuffer::mix(subTempBuffer, out);
         }
-
         mPrevBinaural = false;
-
-        return AudioEffectState::TailComplete;
     }
+
+    return state;
 }
 
 AudioEffectState PathEffect::tail(AudioBuffer& out)
 {
     out.makeSilent();
 
-    if (mSpatialize)
+    if (mSpatialize && mPrevBinaural)
     {
-        if (mPrevBinaural)
-            return mOverlapAddEffect->tail(out);
-        else
-            return AudioEffectState::TailComplete;
+        AudioEffectState state = AudioEffectState::TailComplete;
+
+        float* channelPointers[2];
+        channelPointers[0] = (*mTempBuffer)[0];
+        channelPointers[1] = (*mTempBuffer)[1];
+        AudioBuffer subTempBuffer(2, out.numSamples(), channelPointers);
+
+        for (int band = 0; band < Bands::kNumBands; ++band)
+        {
+            subTempBuffer.makeSilent();
+            auto bandState = mOverlapAddEffects[band]->tail(subTempBuffer);
+            if (bandState == AudioEffectState::TailRemaining) state = AudioEffectState::TailRemaining;
+            
+            AudioBuffer::mix(subTempBuffer, out);
+        }
+        return state;
     }
-    else
-    {
-        return AudioEffectState::TailComplete;
-    }
+
+    return AudioEffectState::TailComplete;
 }
 
 int PathEffect::numTailSamplesRemaining() const
 {
-    if (mSpatialize)
+    if (mSpatialize && mPrevBinaural)
     {
-        if (mPrevBinaural)
-            return mOverlapAddEffect->numTailSamplesRemaining();
-        else
-            return 0;
+        int maxTail = 0;
+        for (int band = 0; band < Bands::kNumBands; ++band)
+        {
+            maxTail = std::max(maxTail, mOverlapAddEffects[band]->numTailSamplesRemaining());
+        }
+        return maxTail;
     }
-    else
-    {
-        return 0;
-    }
+    return 0;
 }
 
 }

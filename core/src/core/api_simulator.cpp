@@ -501,3 +501,74 @@ IPLerror CContext::createSimulator(IPLSimulationSettings* settings,
 }
 
 }
+
+IPLAPI void IPLCALL iplSourceSetCustomPathing(IPLSource source, IPLfloat32* eqCoeffs, IPLfloat32* shCoeffs)
+{
+    if (!source || !eqCoeffs || !shCoeffs)
+        return;
+
+    auto _source = reinterpret_cast<api::CSource*>(source)->mHandle.get();
+    if (!_source)
+        return;
+
+    memcpy(_source->pathingOutputs.eq, eqCoeffs, 3 * sizeof(float));
+    memcpy(_source->pathingOutputs.sh.data(), shCoeffs, _source->pathingOutputs.sh.totalSize() * sizeof(float));
+}
+
+IPLAPI void IPLCALL iplSourceSetCustomPathingBatch(IPLint32 numSources, IPLSource* sources, IPLfloat32* eqCoeffs, IPLfloat32* shCoeffs, IPLint32 shOrder)
+{
+    if (!sources || !eqCoeffs || !shCoeffs)
+        return;
+
+    int numShCoeffs = (shOrder + 1) * (shOrder + 1) * 3; 
+
+    for (int i = 0; i < numSources; ++i)
+    {
+        if (!sources[i]) continue;
+        
+        auto _source = reinterpret_cast<api::CSource*>(sources[i])->mHandle.get();
+        if (!_source) continue;
+
+        memcpy(_source->pathingOutputs.eq, &eqCoeffs[i * 3], 3 * sizeof(float));
+
+        int maxShCoeffs = _source->pathingOutputs.sh.totalSize();
+        if (maxShCoeffs > 0)
+        {
+            int elementsToCopy = (numShCoeffs < maxShCoeffs) ? numShCoeffs : maxShCoeffs;
+            memcpy(_source->pathingOutputs.sh.data(), &shCoeffs[i * numShCoeffs], elementsToCopy * sizeof(float));
+        }
+    }
+}
+
+IPLAPI void IPLCALL iplSourceSetCustomDirectBatch(IPLint32 numSources, IPLSource* sources, IPLVector3* positions, IPLfloat32* occlusions, IPLfloat32* transmissions)
+{
+    if (!sources) return;
+
+    for (int i = 0; i < numSources; ++i)
+    {
+        if (!sources[i]) continue;
+        
+        auto _source = reinterpret_cast<api::CSource*>(sources[i])->mHandle.get();
+        if (!_source) continue;
+
+        if (positions)
+        {
+            ipl::Vector3f pos(positions[i].x, positions[i].y, -positions[i].z);
+            _source->directInputs.source.origin = pos;
+            _source->reflectionInputs.source.origin = pos;
+            _source->pathingInputs.source.origin = pos;
+        }
+
+        if (occlusions)
+        {
+            _source->directOutputs.directPath.occlusion = occlusions[i];
+        }
+
+        if (transmissions)
+        {
+            _source->directOutputs.directPath.transmission[0] = transmissions[i * 3 + 0];
+            _source->directOutputs.directPath.transmission[1] = transmissions[i * 3 + 1];
+            _source->directOutputs.directPath.transmission[2] = transmissions[i * 3 + 2];
+        }
+    }
+}

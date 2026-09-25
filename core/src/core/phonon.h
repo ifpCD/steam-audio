@@ -4223,6 +4223,13 @@ IPLAPI void IPLCALL iplSimulatorRunReflections(IPLSimulator simulator);
 */
 IPLAPI void IPLCALL iplSimulatorRunPathing(IPLSimulator simulator);
 
+/** Directly injects custom pathing data (e.g. from a custom BFS system) into the source. */
+IPLAPI void IPLCALL iplSourceSetCustomPathing(IPLSource source, IPLfloat32* eqCoeffs, IPLfloat32* shCoeffs);
+
+/** Directly injects custom pathing data (e.g. from a custom BFS system) into a batch of sources. */
+IPLAPI void IPLCALL iplSourceSetCustomPathingBatch(IPLint32 numSources, IPLSource* sources, IPLfloat32* eqCoeffs, IPLfloat32* shCoeffs, IPLint32 shOrder);
+
+IPLAPI void IPLCALL iplSourceSetCustomDirectBatch(IPLint32 numSources, IPLSource* sources, IPLVector3* positions, IPLfloat32* occlusions, IPLfloat32* transmissions);
 
 /** Creates a simulation source.
 

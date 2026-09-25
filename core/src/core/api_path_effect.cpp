@@ -124,7 +124,7 @@ IPLAudioEffectState CPathEffect::apply(IPLPathEffectParams* params,
     AudioBuffer _out(out->numChannels, out->numSamples, out->data);
 
     PathEffectParams _params{};
-    _params.eqCoeffs = params->eqCoeffs;
+    // _params.eqCoeffs = params->eqCoeffs;
     _params.shCoeffs = params->shCoeffs;
     _params.order = params->order;
 
@@ -136,7 +136,7 @@ IPLAudioEffectState CPathEffect::apply(IPLPathEffectParams* params,
     }
 
     // todo: version check
-    _params.normalizeEQ = (params->normalizeEQ == IPL_TRUE);
+    // _params.normalizeEQ = (params->normalizeEQ == IPL_TRUE);
 
     return static_cast<IPLAudioEffectState>(_effect->apply(_params, _in, _out));
 }

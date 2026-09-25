@@ -127,8 +127,10 @@ SimulationData::SimulationData(bool enableIndirect,
             pathingOutputs.eq[i] = 0.1f;
         }
 
-        pathingState.sh.resize(SphericalHarmonics::numCoeffsForOrder(maxOrder));
-        pathingOutputs.sh.resize(SphericalHarmonics::numCoeffsForOrder(maxOrder));
+        int numCoeffs = SphericalHarmonics::numCoeffsForOrder(maxOrder) * Bands::kNumBands;
+
+        pathingState.sh.resize(numCoeffs);
+        pathingOutputs.sh.resize(numCoeffs);
         pathingState.sh.zero();
         pathingOutputs.sh.zero();
     }

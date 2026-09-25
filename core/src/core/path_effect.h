@@ -18,11 +18,13 @@
 
 #include "ambisonics_panning_effect.h"
 #include "ambisonics_rotate_effect.h"
-#include "eq_effect.h"
+#include "bands.h"
+#include "iir.h"
 #include "gain_effect.h"
 #include "hrtf_database.h"
 #include "overlap_add_convolution_effect.h"
 #include "sh.h"
+#include <vector>
 
 namespace ipl {
 
@@ -40,27 +42,27 @@ struct PathEffectSettings
 
 struct PathEffectParams
 {
-    const float* eqCoeffs = nullptr;
-    const float* shCoeffs = nullptr;
+    // Pointer to 3 consecutive sets of SH coefficients (Low, Mid, High).
+    // For 3rd order, this should point to 48 floats (16 * 3).
+    const float* shCoeffs = nullptr; 
+    
     int order = 0;
     bool binaural = false;
     const HRTFDatabase* hrtf = nullptr;
     const CoordinateSpace3f* listener = nullptr;
-    bool normalizeEQ = false;
 };
 
-// Renders a sound field as returned by PathSimulator.
+// Renders a crossover-split sound field using 3-band individual SH coefficients.
 class PathEffect
 {
 public:
-    // Initializes the effect.
     PathEffect(const AudioSettings& audioSettings,
                const PathEffectSettings& effectSettings);
 
     // Resets the effect to its initial state.
     void reset();
 
-    // Renders an audio buffer given the SH and EQ coefficients for a sound field.
+    // Renders an audio buffer given the 3-band SH coefficients for a sound field.
     AudioEffectState apply(const PathEffectParams& params,
                            const AudioBuffer& in,
                            AudioBuffer& out);
@@ -72,16 +74,22 @@ public:
 private:
     int mMaxOrder;
     bool mSpatialize;
-    AudioBuffer mEQBuffer; // Result of applying EQ to the dry audio.
-    EQEffect mEQEffect; // For applying the EQ coefficients.
-    Array<unique_ptr<GainEffect>> mGainEffects; // For applying the SH coefficients (#coeffs) or speaker gains (#speakers).
+
+    // Crossover state
+    IIRFilterer mCrossover[Bands::kNumBands];
+    unique_ptr<AudioBuffer> mBandBuffers[Bands::kNumBands];
+    unique_ptr<AudioBuffer> mTempBuffer; 
+
+    vector<unique_ptr<GainEffect>> mGainEffectsRaw[Bands::kNumBands]; // Raw Ambisonics out for when not spatial
+
     unique_ptr<AmbisonicsRotateEffect> mAmbisonicsRotateEffect; // For rotating the SH coefficients when spatializing.
     unique_ptr<AmbisonicsPanningEffect> mAmbisonicsPanningEffect; // For projecting SH coefficients to speaker gains when spatializing.
-    unique_ptr<OverlapAddConvolutionEffect> mOverlapAddEffect; // For applying an HRTF derived from rotated SH coefficients when spatializing.
+    unique_ptr<OverlapAddConvolutionEffect> mOverlapAddEffects[Bands::kNumBands]; // For applying an HRTF derived from rotated SH coefficients when spatializing.
     unique_ptr<AudioBuffer> mAmbisonicsBuffer; // Temp buffer for rotating SH coefficients when spatializing.
     unique_ptr<AudioBuffer> mSpeakerBuffer; // Temp buffer for calculating speaker gains when spatializing.
-    Array<complex_t, 2> mHRTF; // Temp buffer for deriving a single HRTF from rotated SH coefficients when spatializing.
+    
+    vector<unique_ptr<GainEffect>> mGainEffectsPan[Bands::kNumBands];
+    Array<complex_t, 2> mHRTF[Bands::kNumBands]; // Temp buffer for deriving a single HRTF from rotated SH coefficients when spatializing.
     bool mPrevBinaural;
 };
-
 }
