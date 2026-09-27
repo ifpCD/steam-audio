@@ -4223,11 +4223,16 @@ IPLAPI void IPLCALL iplSimulatorRunReflections(IPLSimulator simulator);
 */
 IPLAPI void IPLCALL iplSimulatorRunPathing(IPLSimulator simulator);
 
-/** Directly injects custom pathing data (e.g. from a custom BFS system) into the source. */
-IPLAPI void IPLCALL iplSourceSetCustomPathing(IPLSource source, IPLfloat32* eqCoeffs, IPLfloat32* shCoeffs);
+#define IPL_AMBISONIC_FIELD_MAX_ORDER   10
+#define IPL_AMBISONIC_FIELD_MAX_COEFFS  ((IPL_AMBISONIC_FIELD_MAX_ORDER + 1) * (IPL_AMBISONIC_FIELD_MAX_ORDER + 1))
 
-/** Directly injects custom pathing data (e.g. from a custom BFS system) into a batch of sources. */
-IPLAPI void IPLCALL iplSourceSetCustomPathingBatch(IPLint32 numSources, IPLSource* sources, IPLfloat32* eqCoeffs, IPLfloat32* shCoeffs, IPLint32 shOrder);
+/** Publishes per-band ambisonic fields rendered by the path effect of each source (sources need pathing allocated).
+
+    \param  bandOrders  \c numSources x \c IPL_NUM_BANDS orders, each in [0, \c IPL_AMBISONIC_FIELD_MAX_ORDER].
+    \param  bandCoeffs  \c numSources x \c IPL_NUM_BANDS x \c IPL_AMBISONIC_FIELD_MAX_COEFFS world-space, orthonormal
+                        ACN coefficients; only the first (order + 1)^2 of each band are read.
+*/
+IPLAPI void IPLCALL iplSourceSetAmbisonicFieldBatch(IPLint32 numSources, IPLSource* sources, const IPLint32* bandOrders, const IPLfloat32* bandCoeffs);
 
 IPLAPI void IPLCALL iplSourceSetCustomDirectBatch(IPLint32 numSources, IPLSource* sources, IPLVector3* positions, IPLfloat32* occlusions, IPLfloat32* transmissions);
 

@@ -16,6 +16,7 @@
 
 #include "simulation_data.h"
 
+#include "array_math.h"
 #include "energy_field_factory.h"
 #include "impulse_response_factory.h"
 #include "sh.h"
@@ -127,12 +128,9 @@ SimulationData::SimulationData(bool enableIndirect,
             pathingOutputs.eq[i] = 0.1f;
         }
 
-        int numCoeffs = SphericalHarmonics::numCoeffsForOrder(maxOrder) * Bands::kNumBands;
-
-        pathingState.sh.resize(numCoeffs);
-        pathingOutputs.sh.resize(numCoeffs);
+        pathingState.sh.resize(SphericalHarmonics::numCoeffsForOrder(maxOrder));
         pathingState.sh.zero();
-        pathingOutputs.sh.zero();
+        pathingOutputs.field = ipl::make_unique<AmbisonicFieldExchange>();
     }
 }
 
@@ -154,6 +152,26 @@ bool SimulationData::hasSourceChanged() const
     changed = changed || (fabsf(reflectionInputs.directivity.dipoleWeight - reflectionState.prevDirectivity.dipoleWeight) > 1e-4f);
     changed = changed || (fabsf(reflectionInputs.directivity.dipolePower - reflectionState.prevDirectivity.dipolePower) > 1e-4f);
     return changed;
+}
+
+void SimulationData::publishSimulatedPathing()
+{
+    auto order = std::min(pathingInputs.order, static_cast<int>(AmbisonicField::kMaxOrder));
+    auto numCoeffs = SphericalHarmonics::numCoeffsForOrder(order);
+    auto& field = pathingOutputs.field->back();
+
+    for (auto i = 0; i < Bands::kNumBands; ++i)
+    {
+        field.orders[i] = order;
+        ArrayMath::scale(numCoeffs, pathingState.sh.data(), pathingState.eq[i], field.coeffs[i]);
+    }
+
+    pathingOutputs.field->publish();
+
+    memcpy(pathingOutputs.eq, pathingState.eq, Bands::kNumBands * sizeof(float));
+    pathingOutputs.direction = pathingState.direction;
+    pathingOutputs.distanceRatio = pathingState.distanceRatio;
+    pathingOutputs.totalDeviation = pathingState.totalDeviation;
 }
 
 }

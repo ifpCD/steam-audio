@@ -34,18 +34,30 @@ int SphericalHarmonics::numCoeffsForOrder(int order)
 float SphericalHarmonics::legendre(int n,
                                    float x)
 {
-    switch (n)
+    auto previous = 1.0f;
+    auto current = x;
+
+    if (n == 0)
+        return previous;
+
+    for (auto k = 1; k < n; ++k)
     {
-    case 0:
-        return 1.0f;
-    case 1:
-        return x;
-    case 2:
-        return 0.5f * (3.0f * x * x - 1.0f);
-    case 3:
-        return 0.5f * x * (5.0f * x * x - 3.0f);
-    default:
-        return ((2 * n + 1) * x * legendre(n, x) - n * legendre(n - 1, x)) / (n + 1);
+        auto next = ((2 * k + 1) * x * current - k * previous) / (k + 1);
+        previous = current;
+        current = next;
+    }
+
+    return current;
+}
+
+void SphericalHarmonics::maxREWeights(int order,
+                                      float* weights)
+{
+    auto cosine = cosf((137.9f * Math::kDegreesToRadians) / (order + 1.51f));
+
+    for (auto l = 0; l <= order; ++l)
+    {
+        weights[l] = legendre(l, cosine);
     }
 }
 

@@ -342,11 +342,9 @@ void HRTFMap::loadAmbisonicsHRIRs(const byte_t*& readPointer, int samplingRate)
     {
         auto order = *reinterpret_cast<const int32_t*>(readPointer);
         readPointer += sizeof(int32_t);
+        // lower-order stored HRIRs are superseded by the load-time projection
         if (order != kMaxAmbisonicsOrder)
-        {
-            gLog().message(MessageSeverity::Error, "%s: HRTF data contains Ambisonic HRIRs of unsupported order: %d.", __FUNCTION__, order);
-            throw Exception(Status::Initialization);
-        }
+            return;
 
         auto numCoefficients = SphericalHarmonics::numCoeffsForOrder(order);
 

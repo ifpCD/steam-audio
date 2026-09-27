@@ -37,11 +37,13 @@ struct AmbisonicsPanningEffectParams
 class AmbisonicsPanningEffect
 {
 public:
-    static const int kNumVirtualSpeakers = 24;
-    static const Vector3f kVirtualSpeakers[kNumVirtualSpeakers];
-
     AmbisonicsPanningEffect(const AudioSettings& audioSettings,
                             const AmbisonicsPanningEffectSettings& effectSettings);
+
+    // (#speakers x #coefficients) sampling decoder through the virtual speaker layout, panned onto the given layout.
+    static void buildDecoder(const SpeakerLayout& speakerLayout,
+                             int order,
+                             DynamicMatrixf& decoder);
 
     void reset();
 

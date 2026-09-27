@@ -16,15 +16,14 @@
 
 #pragma once
 
-#include "ambisonics_panning_effect.h"
-#include "ambisonics_rotate_effect.h"
-#include "bands.h"
-#include "iir.h"
-#include "gain_effect.h"
+#include "ambisonic_field.h"
+#include "audio_buffer.h"
 #include "hrtf_database.h"
+#include "iir.h"
+#include "matrix.h"
 #include "overlap_add_convolution_effect.h"
 #include "sh.h"
-#include <vector>
+#include "speaker_layout.h"
 
 namespace ipl {
 
@@ -34,7 +33,6 @@ namespace ipl {
 
 struct PathEffectSettings
 {
-    int maxOrder = 0;
     bool spatialize = false;
     const SpeakerLayout* speakerLayout = nullptr;
     const HRTFDatabase* hrtf = nullptr;
@@ -42,27 +40,22 @@ struct PathEffectSettings
 
 struct PathEffectParams
 {
-    // Pointer to 3 consecutive sets of SH coefficients (Low, Mid, High).
-    // For 3rd order, this should point to 48 floats (16 * 3).
-    const float* shCoeffs = nullptr; 
-    
-    int order = 0;
+    const AmbisonicField* field = nullptr;
     bool binaural = false;
     const HRTFDatabase* hrtf = nullptr;
     const CoordinateSpace3f* listener = nullptr;
 };
 
-// Renders a crossover-split sound field using 3-band individual SH coefficients.
+// Renders a per-band ambisonic field. Binaural rendering is a single HRTF convolution whose spherical harmonic weights
+// cross over between bands in frequency; speaker and raw Ambisonic rendering split the input with IIR band filters.
 class PathEffect
 {
 public:
     PathEffect(const AudioSettings& audioSettings,
                const PathEffectSettings& effectSettings);
 
-    // Resets the effect to its initial state.
     void reset();
 
-    // Renders an audio buffer given the 3-band SH coefficients for a sound field.
     AudioEffectState apply(const PathEffectParams& params,
                            const AudioBuffer& in,
                            AudioBuffer& out);
@@ -72,24 +65,47 @@ public:
     int numTailSamplesRemaining() const;
 
 private:
-    int mMaxOrder;
+    static constexpr int kMaxChannels = AmbisonicField::kMaxCoeffs;
+    static constexpr float kCrossoverOctaves = 1.0f;
+
+    int mSamplingRate;
+    int mFrameSize;
     bool mSpatialize;
-
-    // Crossover state
-    IIRFilterer mCrossover[Bands::kNumBands];
-    unique_ptr<AudioBuffer> mBandBuffers[Bands::kNumBands];
-    unique_ptr<AudioBuffer> mTempBuffer; 
-
-    vector<unique_ptr<GainEffect>> mGainEffectsRaw[Bands::kNumBands]; // Raw Ambisonics out for when not spatial
-
-    unique_ptr<AmbisonicsRotateEffect> mAmbisonicsRotateEffect; // For rotating the SH coefficients when spatializing.
-    unique_ptr<AmbisonicsPanningEffect> mAmbisonicsPanningEffect; // For projecting SH coefficients to speaker gains when spatializing.
-    unique_ptr<OverlapAddConvolutionEffect> mOverlapAddEffects[Bands::kNumBands]; // For applying an HRTF derived from rotated SH coefficients when spatializing.
-    unique_ptr<AudioBuffer> mAmbisonicsBuffer; // Temp buffer for rotating SH coefficients when spatializing.
-    unique_ptr<AudioBuffer> mSpeakerBuffer; // Temp buffer for calculating speaker gains when spatializing.
-    
-    vector<unique_ptr<GainEffect>> mGainEffectsPan[Bands::kNumBands];
-    Array<complex_t, 2> mHRTF[Bands::kNumBands]; // Temp buffer for deriving a single HRTF from rotated SH coefficients when spatializing.
     bool mPrevBinaural;
+
+    int mOrders[Bands::kNumBands];
+    float mCoeffs[Bands::kNumBands][AmbisonicField::kMaxCoeffs];
+
+    unique_ptr<FFT> mFieldFFT;
+    unique_ptr<FFT> mConvolutionFFT;
+    unique_ptr<OverlapAddConvolutionEffect> mConvolution;
+    int mSupport[Bands::kNumBands][2]; // First and one-past-last field spectrum bin with nonzero crossover weight.
+    Array<float, 2> mCrossover; // Band weights summing to 1. #bands * #fieldspectrumsamples.
+    Array<complex_t, 2> mBandHRTF; // #bands * #fieldspectrumsamples.
+    Array<complex_t> mFieldHRTF; // #fieldspectrumsamples.
+    Array<float> mHRIR; // #convolutionsamples.
+    Array<complex_t, 2> mHRTF; // #ears * #convolutionspectrumsamples.
+
+    IIRFilterer mBandFilters[Bands::kNumBands];
+    Array<float, 2> mBandSignals; // #bands * #samples.
+    DynamicMatrixf mDecoder; // #speakers * #coefficients.
+    Array<float, 2> mPrevGains; // #bands * #channels.
+
+    static const SHRotation& listenerRotation(const CoordinateSpace3f& listener);
+
+    void loadField(const AmbisonicField& field,
+                   const SHRotation* rotation,
+                   bool maxRE);
+
+    void buildCrossover();
+
+    AudioEffectState applyBinaural(const HRTFDatabase& hrtf,
+                                   const AudioBuffer& in,
+                                   AudioBuffer& out);
+
+    void applyGains(bool decode,
+                    const AudioBuffer& in,
+                    AudioBuffer& out);
 };
+
 }

@@ -15,9 +15,9 @@
 //
 
 #include "path_effect.h"
+
+#include "ambisonics_panning_effect.h"
 #include "array_math.h"
-#include "sh.h"
-#include "bands.h"
 
 namespace ipl {
 
@@ -26,93 +26,62 @@ namespace ipl {
 // --------------------------------------------------------------------------------------------------------------------
 
 PathEffect::PathEffect(const AudioSettings& audioSettings,
-    const PathEffectSettings& effectSettings)
-    : mMaxOrder(effectSettings.maxOrder)
+                       const PathEffectSettings& effectSettings)
+    : mSamplingRate(audioSettings.samplingRate)
+    , mFrameSize(audioSettings.frameSize)
     , mSpatialize(effectSettings.spatialize)
     , mPrevBinaural(false)
+    , mBandSignals(Bands::kNumBands, audioSettings.frameSize)
+    , mPrevGains(Bands::kNumBands, kMaxChannels)
 {
-    // initialize crossover filters
     IIR filters[Bands::kNumBands];
     IIR::bandFilters(filters, audioSettings.samplingRate);
 
-    for (int i = 0; i < Bands::kNumBands; ++i)
+    for (auto i = 0; i < Bands::kNumBands; ++i)
     {
-        mCrossover[i].setFilter(filters[i]);
-        mBandBuffers[i] = make_unique<AudioBuffer>(1, audioSettings.frameSize);
+        mBandFilters[i].setFilter(filters[i]);
     }
-
-    // scratch buffer for the max possible channels
-    int maxOutChannels = std::max(2, SphericalHarmonics::numCoeffsForOrder(effectSettings.maxOrder));
-    if (effectSettings.speakerLayout) {
-        maxOutChannels = std::max(maxOutChannels, effectSettings.speakerLayout->numSpeakers);
-    }
-    mTempBuffer = make_unique<AudioBuffer>(maxOutChannels, audioSettings.frameSize);
 
     if (mSpatialize)
     {
-        AmbisonicsRotateEffectSettings ambisonicsRotateSettings{};
-        ambisonicsRotateSettings.maxOrder = effectSettings.maxOrder;
-
-        mAmbisonicsRotateEffect = make_unique<AmbisonicsRotateEffect>(AudioSettings{audioSettings.samplingRate, 1}, ambisonicsRotateSettings);
-
-        AmbisonicsPanningEffectSettings ambisonicsPanningSettings{};
-        ambisonicsPanningSettings.speakerLayout = effectSettings.speakerLayout;
-        ambisonicsPanningSettings.maxOrder = effectSettings.maxOrder;
-
-        mAmbisonicsPanningEffect = make_unique<AmbisonicsPanningEffect>(audioSettings, ambisonicsPanningSettings);
-
-        OverlapAddConvolutionEffectSettings overlapAddSettings{};
-        overlapAddSettings.numChannels = IHRTFMap::kNumEars;
-        overlapAddSettings.irSize = effectSettings.hrtf->numSamples();
-
-        mAmbisonicsBuffer = make_unique<AudioBuffer>(SphericalHarmonics::numCoeffsForOrder(effectSettings.maxOrder), 1);
-        mSpeakerBuffer = make_unique<AudioBuffer>(effectSettings.speakerLayout->numSpeakers, 1);
-
-        for (int i = 0; i < Bands::kNumBands; ++i)
-        {
-            mOverlapAddEffects[i] = make_unique<OverlapAddConvolutionEffect>(audioSettings, overlapAddSettings);
-            mHRTF[i].resize(2, effectSettings.hrtf->numSpectrumSamples());
-
-            for (int j = 0; j < effectSettings.speakerLayout->numSpeakers; ++j)
-            {
-                mGainEffectsPan[i].push_back(make_unique<GainEffect>(audioSettings));
-            }
-        }
+        AmbisonicsPanningEffect::buildDecoder(*effectSettings.speakerLayout, AmbisonicField::kMaxOrder, mDecoder);
     }
-    else
+
+    if (mSpatialize && effectSettings.hrtf)
     {
-        int numCoeffs = SphericalHarmonics::numCoeffsForOrder(effectSettings.maxOrder);
-        for (int i = 0; i < Bands::kNumBands; ++i)
-        {
-            for (int j = 0; j < numCoeffs; ++j)
-            {
-                mGainEffectsRaw[i].push_back(make_unique<GainEffect>(audioSettings));
-            }
-        }
+        mFieldFFT = ipl::make_unique<FFT>(effectSettings.hrtf->fieldIRSize());
+
+        OverlapAddConvolutionEffectSettings convolutionSettings{};
+        convolutionSettings.numChannels = IHRTFMap::kNumEars;
+        convolutionSettings.irSize = mFieldFFT->numRealSamples;
+
+        mConvolution = ipl::make_unique<OverlapAddConvolutionEffect>(audioSettings, convolutionSettings);
+        mConvolutionFFT = ipl::make_unique<FFT>(mConvolution->wetAudioSize());
+
+        mCrossover.resize(Bands::kNumBands, mFieldFFT->numComplexSamples);
+        mBandHRTF.resize(Bands::kNumBands, mFieldFFT->numComplexSamples);
+        mFieldHRTF.resize(mFieldFFT->numComplexSamples);
+        mHRIR.resize(mConvolutionFFT->numRealSamples);
+        mHRTF.resize(IHRTFMap::kNumEars, mConvolutionFFT->numComplexSamples);
+
+        buildCrossover();
     }
+
+    reset();
 }
 
 void PathEffect::reset()
 {
-    for (int i = 0; i < Bands::kNumBands; ++i)
+    for (auto i = 0; i < Bands::kNumBands; ++i)
     {
-        mCrossover[i].reset();
-        
-        if (mSpatialize)
-        {
-            mOverlapAddEffects[i]->reset();
-            for (auto& gain : mGainEffectsPan[i]) gain->reset();
-        }
-        else
-        {
-            for (auto& gain : mGainEffectsRaw[i]) gain->reset();
-        }
+        mBandFilters[i].reset();
     }
 
-    if (mSpatialize)
+    mPrevGains.zero();
+
+    if (mConvolution)
     {
-        mAmbisonicsRotateEffect->reset();
-        mAmbisonicsPanningEffect->reset();
+        mConvolution->reset();
     }
 
     mPrevBinaural = false;
@@ -127,155 +96,223 @@ AudioEffectState PathEffect::apply(const PathEffectParams& params,
 
     out.makeSilent();
 
-    // process crossover into 3 frequency bands
-    for (int i = 0; i < Bands::kNumBands; ++i)
+    if (!params.field)
+        return AudioEffectState::TailComplete;
+
+    if (mSpatialize && params.binaural)
     {
-        mCrossover[i].apply(in.numSamples(), in[0], (*mBandBuffers[i])[0]);
+        loadField(*params.field, &listenerRotation(*params.listener), true);
+        mPrevBinaural = true;
+        return applyBinaural(*params.hrtf, in, out);
     }
 
-    int numCoeffs = SphericalHarmonics::numCoeffsForOrder(params.order);
-    AudioEffectState state = AudioEffectState::TailComplete;
-
-    // stack-allocated wrapper around the temp buffer so AudioBuffer::mix won't assert.
-    float* channelPointers[32]; // accommodate max out channels
-    for (int i = 0; i < out.numChannels(); ++i) channelPointers[i] = (*mTempBuffer)[i];
-    AudioBuffer subTempBuffer(out.numChannels(), out.numSamples(), channelPointers);
-
-    if (mSpatialize)
-    {
-        for (int band = 0; band < Bands::kNumBands; ++band)
-        {
-            const float* bandSH = &params.shCoeffs[band * numCoeffs];
-
-            // load SH coeffs for this band
-            for (int i = 0; i < numCoeffs; ++i)
-                (*mAmbisonicsBuffer)[i][0] = bandSH[i];
-
-            // rotate SH coefficients for player orientation
-            AmbisonicsRotateEffectParams rotateParams{};
-            rotateParams.orientation = params.listener;
-            rotateParams.order = params.order;
-            mAmbisonicsRotateEffect->apply(rotateParams, *mAmbisonicsBuffer, *mAmbisonicsBuffer);
-
-            subTempBuffer.makeSilent();
-
-            if (params.binaural)
-            {
-                // collapse 16-channel HRTF into 2-channel binaural HRIR using SH
-                memset(mHRTF[band].flatData(), 0, mHRTF[band].totalSize() * sizeof(complex_t));
-                auto cosine = cosf((137.9f * Math::kDegreesToRadians) / (params.order + 1.51f));
-
-                for (auto l = 0, i = 0; l <= params.order; ++l)
-                {
-                    auto scalar = SphericalHarmonics::legendre(l, cosine);
-                    for (auto m = -l; m <= l; ++m, ++i)
-                    {
-                        const complex_t* hrtfForChannel[2] = {nullptr, nullptr};
-                        params.hrtf->ambisonicsHRTF(i, hrtfForChannel);
-
-                        for (auto k = 0; k < IHRTFMap::kNumEars; ++k)
-                        {
-                            ArrayMath::scaleAccumulate(params.hrtf->numSpectrumSamples(),
-                                reinterpret_cast<const float*>(hrtfForChannel[k]),
-                                scalar * (*mAmbisonicsBuffer)[i][0],
-                                reinterpret_cast<float*>(mHRTF[band][k]));
-                        }
-                    }
-                }
-
-                // convolve mono input with combined HRIR
-                OverlapAddConvolutionEffectParams overlapAddParams{};
-                overlapAddParams.fftIR = mHRTF[band].data();
-                
-                auto bandState = mOverlapAddEffects[band]->apply(overlapAddParams, *mBandBuffers[band], subTempBuffer);
-                if (bandState == AudioEffectState::TailRemaining) state = AudioEffectState::TailRemaining;
-                
-                AudioBuffer::mix(subTempBuffer, out);
-                mPrevBinaural = true;
-            }
-            else
-            {
-                AmbisonicsPanningEffectParams panParams{};
-                panParams.order = params.order;
-                mAmbisonicsPanningEffect->apply(panParams, *mAmbisonicsBuffer, *mSpeakerBuffer);
-
-                for (int i = 0; i < out.numChannels(); ++i)
-                {
-                    AudioBuffer outChannel(subTempBuffer, i);
-                    GainEffectParams gainParams{};
-                    gainParams.gain = (*mSpeakerBuffer)[i][0];
-
-                    mGainEffectsPan[band][i]->apply(gainParams, *mBandBuffers[band], outChannel);
-                }
-                
-                AudioBuffer::mix(subTempBuffer, out);
-                mPrevBinaural = false;
-            }
-        }
-    }
-    else
-    {
-        for (int band = 0; band < Bands::kNumBands; ++band)
-        {
-            subTempBuffer.makeSilent();
-            const float* bandSH = &params.shCoeffs[band * numCoeffs];
-
-            for (int i = 0; i < numCoeffs; ++i)
-            {
-                AudioBuffer outChannel(subTempBuffer, i);
-                GainEffectParams gainParams{};
-                gainParams.gain = bandSH[i];
-
-                mGainEffectsRaw[band][i]->apply(gainParams, *mBandBuffers[band], outChannel);
-            }
-            
-            AudioBuffer::mix(subTempBuffer, out);
-        }
-        mPrevBinaural = false;
-    }
-
-    return state;
+    loadField(*params.field, mSpatialize ? &listenerRotation(*params.listener) : nullptr, mSpatialize);
+    applyGains(mSpatialize, in, out);
+    mPrevBinaural = false;
+    return AudioEffectState::TailComplete;
 }
 
 AudioEffectState PathEffect::tail(AudioBuffer& out)
 {
+    if (mPrevBinaural)
+        return mConvolution->tail(out);
+
     out.makeSilent();
-
-    if (mSpatialize && mPrevBinaural)
-    {
-        AudioEffectState state = AudioEffectState::TailComplete;
-
-        float* channelPointers[2];
-        channelPointers[0] = (*mTempBuffer)[0];
-        channelPointers[1] = (*mTempBuffer)[1];
-        AudioBuffer subTempBuffer(2, out.numSamples(), channelPointers);
-
-        for (int band = 0; band < Bands::kNumBands; ++band)
-        {
-            subTempBuffer.makeSilent();
-            auto bandState = mOverlapAddEffects[band]->tail(subTempBuffer);
-            if (bandState == AudioEffectState::TailRemaining) state = AudioEffectState::TailRemaining;
-            
-            AudioBuffer::mix(subTempBuffer, out);
-        }
-        return state;
-    }
-
     return AudioEffectState::TailComplete;
 }
 
 int PathEffect::numTailSamplesRemaining() const
 {
-    if (mSpatialize && mPrevBinaural)
+    return mPrevBinaural ? mConvolution->numTailSamplesRemaining() : 0;
+}
+
+// Every path effect on an audio thread renders against the same listener, so the order-10 rotation is built once.
+const SHRotation& PathEffect::listenerRotation(const CoordinateSpace3f& listener)
+{
+    static thread_local SHRotation rotation(AmbisonicField::kMaxOrder);
+    static thread_local Vector3f ahead(0.0f, 0.0f, 0.0f);
+    static thread_local Vector3f up(0.0f, 0.0f, 0.0f);
+
+    if (memcmp(&ahead, &listener.ahead, sizeof(Vector3f)) != 0 || memcmp(&up, &listener.up, sizeof(Vector3f)) != 0)
     {
-        int maxTail = 0;
-        for (int band = 0; band < Bands::kNumBands; ++band)
-        {
-            maxTail = std::max(maxTail, mOverlapAddEffects[band]->numTailSamplesRemaining());
-        }
-        return maxTail;
+        rotation.setRotation(listener);
+        ahead = listener.ahead;
+        up = listener.up;
     }
-    return 0;
+
+    return rotation;
+}
+
+void PathEffect::loadField(const AmbisonicField& field,
+                           const SHRotation* rotation,
+                           bool maxRE)
+{
+    float weights[AmbisonicField::kMaxOrder + 1];
+
+    for (auto band = 0; band < Bands::kNumBands; ++band)
+    {
+        auto order = std::min(std::max(static_cast<int>(field.orders[band]), 0), static_cast<int>(AmbisonicField::kMaxOrder));
+        mOrders[band] = order;
+
+        if (rotation)
+        {
+            rotation->apply(order, field.coeffs[band], mCoeffs[band]);
+        }
+        else
+        {
+            memcpy(mCoeffs[band], field.coeffs[band], SphericalHarmonics::numCoeffsForOrder(order) * sizeof(float));
+        }
+
+        if (!maxRE)
+            continue;
+
+        SphericalHarmonics::maxREWeights(order, weights);
+
+        for (auto l = 0, i = 0; l <= order; ++l)
+        {
+            for (auto m = -l; m <= l; ++m, ++i)
+            {
+                mCoeffs[band][i] *= weights[l];
+            }
+        }
+    }
+}
+
+// Raised-cosine crossovers, one octave wide in log frequency, centered on the phonon band edges. Complementary weights
+// keep a field that is identical across bands exactly equal to the single-band rendering.
+void PathEffect::buildCrossover()
+{
+    auto numBins = mFieldFFT->numComplexSamples;
+    auto binWidth = static_cast<float>(mSamplingRate) / mFieldFFT->numRealSamples;
+
+    for (auto bin = 0; bin < numBins; ++bin)
+    {
+        auto frequency = bin * binWidth;
+        auto lowerPass = 0.0f;
+
+        for (auto band = 0; band < Bands::kNumBands; ++band)
+        {
+            auto pass = 1.0f;
+
+            if (band < Bands::kNumBands - 1 && bin > 0)
+            {
+                auto position = log2f(frequency / Bands::kHighCutoffFrequencies[band]) / kCrossoverOctaves;
+                auto transition = std::min(std::max(position + 0.5f, 0.0f), 1.0f);
+                pass = 0.5f + 0.5f * cosf(Math::kPi * transition);
+            }
+
+            mCrossover[band][bin] = pass - lowerPass;
+            lowerPass = pass;
+        }
+    }
+
+    for (auto band = 0; band < Bands::kNumBands; ++band)
+    {
+        auto first = 0;
+        while (first < numBins && mCrossover[band][first] <= 0.0f)
+            ++first;
+
+        auto end = numBins;
+        while (end > first && mCrossover[band][end - 1] <= 0.0f)
+            --end;
+
+        mSupport[band][0] = first;
+        mSupport[band][1] = end;
+    }
+}
+
+AudioEffectState PathEffect::applyBinaural(const HRTFDatabase& hrtf,
+                                           const AudioBuffer& in,
+                                           AudioBuffer& out)
+{
+    auto numBins = mFieldFFT->numComplexSamples;
+
+    for (auto ear = 0; ear < IHRTFMap::kNumEars; ++ear)
+    {
+        mBandHRTF.zero();
+
+        for (auto band = 0; band < Bands::kNumBands; ++band)
+        {
+            auto first = mSupport[band][0];
+            auto numSupported = mSupport[band][1] - first;
+            auto order = mOrders[band];
+            auto bandHRTF = reinterpret_cast<float*>(&mBandHRTF[band][first]);
+
+            for (auto i = 0; i < SphericalHarmonics::numCoeffsForOrder(order); ++i)
+            {
+                if (mCoeffs[band][i] == 0.0f)
+                    continue;
+
+                ArrayMath::scaleAccumulate(2 * numSupported, reinterpret_cast<const float*>(hrtf.fieldHRTF(ear, order, i) + first),
+                                           mCoeffs[band][i], bandHRTF);
+            }
+        }
+
+        for (auto bin = 0; bin < numBins; ++bin)
+        {
+            complex_t sum = 0.0f;
+
+            for (auto band = 0; band < Bands::kNumBands; ++band)
+            {
+                sum += mCrossover[band][bin] * mBandHRTF[band][bin];
+            }
+
+            mFieldHRTF[bin] = sum;
+        }
+
+        mHRIR.zero();
+        mFieldFFT->applyInverse(mFieldHRTF.data(), mHRIR.data());
+        mConvolutionFFT->applyForward(mHRIR.data(), mHRTF[ear]);
+    }
+
+    OverlapAddConvolutionEffectParams convolutionParams{};
+    convolutionParams.fftIR = mHRTF.data();
+
+    return mConvolution->apply(convolutionParams, in, out);
+}
+
+void PathEffect::applyGains(bool decode,
+                            const AudioBuffer& in,
+                            AudioBuffer& out)
+{
+    auto numChannels = out.numChannels();
+    auto rampStep = 1.0f / mFrameSize;
+
+    for (auto band = 0; band < Bands::kNumBands; ++band)
+    {
+        mBandFilters[band].apply(mFrameSize, in[0], mBandSignals[band]);
+
+        auto numCoeffs = SphericalHarmonics::numCoeffsForOrder(mOrders[band]);
+        auto prevGains = mPrevGains[band];
+        auto signal = mBandSignals[band];
+
+        for (auto channel = 0; channel < numChannels; ++channel)
+        {
+            auto target = 0.0f;
+
+            if (decode)
+            {
+                for (auto i = 0; i < numCoeffs; ++i)
+                {
+                    target += mDecoder(channel, i) * mCoeffs[band][i];
+                }
+            }
+            else if (channel < numCoeffs)
+            {
+                target = mCoeffs[band][channel];
+            }
+
+            auto gain = prevGains[channel];
+            auto gainStep = (target - gain) * rampStep;
+
+            for (auto k = 0; k < mFrameSize; ++k, gain += gainStep)
+            {
+                out[channel][k] += gain * signal[k];
+            }
+
+            prevGains[channel] = target;
+        }
+    }
 }
 
 }
