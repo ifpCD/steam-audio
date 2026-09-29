@@ -16,7 +16,6 @@
 
 #include "hrtf_database.h"
 
-#include "ambisonics_panning_effect.h"
 #include "array_math.h"
 #include "float4.h"
 #include "fft.h"
@@ -40,6 +39,7 @@ HRTFDatabase::HRTFDatabase(const HRTFSettings& hrtfSettings,
     , mHRTFMap(HRTFMapFactory::create(hrtfSettings, samplingRate))
     , mFFTInterpolation(mHRTFMap->numSamples())
     , mFFTAudioProcessing(frameSize + (frameSize / 4) + mHRTFMap->numSamples() - 1)
+    , mFFTField(2 * mFFTInterpolation.numRealSamples)
     , mHRTF(IHRTFMap::kNumEars, numHRIRs(), mFFTAudioProcessing.numComplexSamples)
     , mPeakDelay(IHRTFMap::kNumEars, numHRIRs())
     , mHRTFMagnitude(IHRTFMap::kNumEars, numHRIRs(), mFFTInterpolation.numComplexSamples)
@@ -49,6 +49,7 @@ HRTFDatabase::HRTFDatabase(const HRTFSettings& hrtfSettings,
     , mInterpolatedHRTF(IHRTFMap::kNumEars, mFFTInterpolation.numComplexSamples)
     , mInterpolatedHRIR(IHRTFMap::kNumEars, mFFTAudioProcessing.numRealSamples)
     , mAmbisonicsHRTF(IHRTFMap::kNumEars, SphericalHarmonics::numCoeffsForOrder(IHRTFMap::kMaxAmbisonicsOrder), mFFTAudioProcessing.numComplexSamples)
+    , mFieldHRTF(IHRTFMap::kNumEars, fieldIndex(IHRTFMap::kMaxAmbisonicsOrder + 1, 0), mFFTField.numComplexSamples)
 {
     updateReferenceLoudness(hrtfSettings.normType);
     applyVolumeSettings(hrtfSettings.volume, hrtfSettings.normType);
@@ -56,12 +57,10 @@ HRTFDatabase::HRTFDatabase(const HRTFSettings& hrtfSettings,
     extractPeakDelays();
     decomposeToMagnitudePhase(mHRTFMap->hrtfData(), mHRTFMagnitude, mHRTFPhase);
 
+    precomputeAmbisonicsHRTFs();
+
     const auto& ambisonicsHRIR = mHRTFMap->ambisonicsData();
-    if (ambisonicsHRIR.totalSize() == 0)
-    {
-        precomputeAmbisonicsHRTFs(samplingRate, frameSize);
-    }
-    else
+    if (ambisonicsHRIR.totalSize() != 0)
     {
         fourierTransformHRIRs(ambisonicsHRIR, mAmbisonicsHRTF);
     }
@@ -472,60 +471,6 @@ void HRTFDatabase::applySpatialBlend(int numRealSamples,
         for (auto k = 0; k < numComplexSamples; ++k)
         {
             hrtfPhaseBlended[k] = hrtfPhase[k];
-        }
-    }
-}
-
-void HRTFDatabase::precomputeAmbisonicsHRTFs(int samplingRate,
-                                             int frameSize)
-{
-    const auto numCoefficients = SphericalHarmonics::numCoeffsForOrder(IHRTFMap::kMaxAmbisonicsOrder);
-
-    const auto numSpeakers = AmbisonicsPanningEffect::kNumVirtualSpeakers;
-    const auto virtualSpeakers = AmbisonicsPanningEffect::kVirtualSpeakers;
-
-    Array<float, 3> minPhaseHRIR(IHRTFMap::kNumEars, numHRIRs(), numSamples());
-    convertToMinimumPhase(mHRTFMap->hrtfData(), minPhaseHRIR);
-
-    Array<float, 3> minPhaseHRTFMagnitude(IHRTFMap::kNumEars, numHRIRs(), mFFTInterpolation.numComplexSamples);
-    Array<float, 3> minPhaseHRTFPhase(IHRTFMap::kNumEars, numHRIRs(), mFFTInterpolation.numComplexSamples);
-    decomposeToMagnitudePhase(minPhaseHRIR, minPhaseHRTFMagnitude, minPhaseHRTFPhase);
-
-    mAmbisonicsHRTF.zero();
-
-    Array<complex_t> tempInterpolatedHRTF(mFFTAudioProcessing.numComplexSamples);
-
-    for (auto l = 0, index = 0; l <= IHRTFMap::kMaxAmbisonicsOrder; ++l)
-    {
-        for (auto m = -l; m <= l; ++m, ++index)
-        {
-            for (auto i = 0; i < numSpeakers; ++i)
-            {
-                auto weight = ((4.0f * Math::kPi) / numSpeakers) * SphericalHarmonics::evaluate(l, m, virtualSpeakers[i]);
-
-                int indices[8];
-                float weights[8];
-                mHRTFMap->interpolatedHRIRWeights(virtualSpeakers[i], indices, weights);
-
-                // We can just blend the (smaller) interpolatedHRTF for each virtual speaker, IFFT it once, and
-                // then FFT it once with zero-padding. This will reduce the number of IFFT/FFTs required during the SH
-                // projection step by a factor of #virtualspeakers.
-                interpolateHRIRs(indices, weights, 1.0f, HRTFPhaseType::None);
-
-                for (auto j = 0; j < IHRTFMap::kNumEars; ++j)
-                {
-                    memcpy(tempInterpolatedHRTF.data(), mInterpolatedHRTF[j], mInterpolatedHRTF.size(1) * sizeof(complex_t));
-                    ArrayMath::scale(mFFTAudioProcessing.numComplexSamples, tempInterpolatedHRTF.data(), weight, tempInterpolatedHRTF.data());
-                    ArrayMath::add(mFFTAudioProcessing.numComplexSamples, mAmbisonicsHRTF[j][index], tempInterpolatedHRTF.data(), mAmbisonicsHRTF[j][index]);
-                }
-            }
-
-            for (auto j = 0; j < IHRTFMap::kNumEars; ++j)
-            {
-                mFFTInterpolation.applyInverse(mAmbisonicsHRTF[j][index], mInterpolatedHRIR[j]);
-                memset(mInterpolatedHRIR[j] + numSamples(), 0, (mFFTInterpolation.numRealSamples - numSamples()) * sizeof(float));
-                mFFTAudioProcessing.applyForward(mInterpolatedHRIR[j], mAmbisonicsHRTF[j][index]);
-            }
         }
     }
 }

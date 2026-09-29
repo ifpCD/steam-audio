@@ -37,6 +37,7 @@
 #include "api_ambisonics_decode_effect.h"
 #include "api_direct_effect.h"
 #include "api_indirect_effect.h"
+#include "ambisonic_field.h"
 #include "api_path_effect.h"
 #include "api_probes.h"
 #include "api_simulator.h"
@@ -601,9 +602,13 @@ std::string to_string(T* value)
         for (int iBand = 0; iBand < Bands::kNumBands; ++iBand) { \
             VALIDATE(IPLfloat32, value->eqCoeffs[iBand], (0.0f < value->eqCoeffs[iBand] && value->eqCoeffs[iBand] <= 1.0f)); \
         } \
-        VALIDATE(IPLint32, value->order, (value->order >= 0)); \
-        for (int iCoeff = 0; iCoeff < (value->order + 1) * (value->order + 1); ++iCoeff) { \
-            VALIDATE_IPLfloat32(value->shCoeffs[iCoeff]); \
+        auto field = reinterpret_cast<const AmbisonicField*>(value->shCoeffs); \
+        VALIDATE_POINTER(field); \
+        for (int iBand = 0; field && iBand < Bands::kNumBands; ++iBand) { \
+            VALIDATE(IPLint32, field->orders[iBand], (0 <= field->orders[iBand] && field->orders[iBand] <= AmbisonicField::kMaxOrder)); \
+            for (int iCoeff = 0; iCoeff < (field->orders[iBand] + 1) * (field->orders[iBand] + 1); ++iCoeff) { \
+                VALIDATE_IPLfloat32(field->coeffs[iBand][iCoeff]); \
+            } \
         } \
         VALIDATE_IPLbool(value->binaural); \
         if (value->binaural) { \

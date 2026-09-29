@@ -67,7 +67,6 @@ CPathEffect::CPathEffect(CContext* context,
     SpeakerLayout _speakerLayout{};
 
     PathEffectSettings _effectSettings{};
-    _effectSettings.maxOrder = effectSettings->maxOrder;
 
     if (Context::isCallerAPIVersionAtLeast(4, 4))
     {
@@ -124,9 +123,7 @@ IPLAudioEffectState CPathEffect::apply(IPLPathEffectParams* params,
     AudioBuffer _out(out->numChannels, out->numSamples, out->data);
 
     PathEffectParams _params{};
-    // _params.eqCoeffs = params->eqCoeffs;
-    _params.shCoeffs = params->shCoeffs;
-    _params.order = params->order;
+    _params.field = reinterpret_cast<const AmbisonicField*>(params->shCoeffs);
 
     if (Context::isCallerAPIVersionAtLeast(4, 4))
     {
@@ -134,9 +131,6 @@ IPLAudioEffectState CPathEffect::apply(IPLPathEffectParams* params,
         _params.hrtf = params->hrtf ? reinterpret_cast<CHRTF*>(params->hrtf)->mHandle.get().get() : nullptr;
         _params.listener = reinterpret_cast<const CoordinateSpace3f*>(&params->listener);
     }
-
-    // todo: version check
-    // _params.normalizeEQ = (params->normalizeEQ == IPL_TRUE);
 
     return static_cast<IPLAudioEffectState>(_effect->apply(_params, _in, _out));
 }
@@ -154,9 +148,6 @@ IPLerror CContext::createPathEffect(IPLAudioSettings* audioSettings,
         return IPL_STATUS_FAILURE;
 
     if (audioSettings->samplingRate <= 0 || audioSettings->frameSize <= 0)
-        return IPL_STATUS_FAILURE;
-
-    if (effectSettings->maxOrder < 0 || 3 < effectSettings->maxOrder)
         return IPL_STATUS_FAILURE;
 
     try

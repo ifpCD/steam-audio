@@ -639,11 +639,7 @@ void SimulationManager::simulatePathing()
                                 source->pathingState.eq, source->pathingState.sh.data(), source->pathingInputs.distanceAttenuationModel, source->pathingInputs.deviationModel, &source->pathingState.direction, &source->pathingState.distanceRatio, 
                                 &source->pathingState.totalDeviation, mSharedData->pathing.visCallback, mSharedData->pathing.userData);
 
-            memcpy(source->pathingOutputs.eq, source->pathingState.eq, Bands::kNumBands * sizeof(float));
-            memcpy(source->pathingOutputs.sh.data(), source->pathingState.sh.data(), source->pathingOutputs.sh.totalSize() * sizeof(float));
-            source->pathingOutputs.direction = source->pathingState.direction;
-            source->pathingOutputs.distanceRatio = source->pathingState.distanceRatio;
-            source->pathingOutputs.totalDeviation = source->pathingState.totalDeviation;
+            source->publishSimulatedPathing();
         }
     }
 }
@@ -685,11 +681,7 @@ void SimulationManager::simulatePathing(SimulationData& source)
             source.pathingState.eq, source.pathingState.sh.data(), source.pathingInputs.distanceAttenuationModel, source.pathingInputs.deviationModel, &source.pathingState.direction, &source.pathingState.distanceRatio, 
             &source.pathingState.totalDeviation, mSharedData->pathing.visCallback, mSharedData->pathing.userData);
 
-        memcpy(source.pathingOutputs.eq, source.pathingState.eq, Bands::kNumBands * sizeof(float));
-        memcpy(source.pathingOutputs.sh.data(), source.pathingState.sh.data(), source.pathingOutputs.sh.totalSize() * sizeof(float));
-        source.pathingOutputs.direction = source.pathingState.direction;
-        source.pathingOutputs.distanceRatio = source.pathingState.distanceRatio;
-        source.pathingOutputs.totalDeviation = source.pathingState.totalDeviation;
+        source.publishSimulatedPathing();
     }
 }
 
@@ -720,11 +712,7 @@ void SimulationManager::simulatePathing(SimulationData& source, ProbeNeighborhoo
             source.pathingState.eq, source.pathingState.sh.data(), source.pathingInputs.distanceAttenuationModel, source.pathingInputs.deviationModel, &source.pathingState.direction, &source.pathingState.distanceRatio, 
             &source.pathingState.totalDeviation, mSharedData->pathing.visCallback, mSharedData->pathing.userData);
 
-        memcpy(source.pathingOutputs.eq, source.pathingState.eq, Bands::kNumBands * sizeof(float));
-        memcpy(source.pathingOutputs.sh.data(), source.pathingState.sh.data(), source.pathingOutputs.sh.totalSize() * sizeof(float));
-        source.pathingOutputs.direction = source.pathingState.direction;
-        source.pathingOutputs.distanceRatio = source.pathingState.distanceRatio;
-        source.pathingOutputs.totalDeviation = source.pathingState.totalDeviation;
+        source.publishSimulatedPathing();
     }
 }
 
@@ -744,11 +732,7 @@ void SimulationManager::simulatePathing(SimulationData& source, ProbeNeighborhoo
             source.pathingState.eq, source.pathingState.sh.data(), source.pathingInputs.distanceAttenuationModel, source.pathingInputs.deviationModel, &source.pathingState.direction, &source.pathingState.distanceRatio, 
             &source.pathingState.totalDeviation, mSharedData->pathing.visCallback, mSharedData->pathing.userData, true);
 
-        memcpy(source.pathingOutputs.eq, source.pathingState.eq, Bands::kNumBands * sizeof(float));
-        memcpy(source.pathingOutputs.sh.data(), source.pathingState.sh.data(), source.pathingOutputs.sh.totalSize() * sizeof(float));
-        source.pathingOutputs.direction = source.pathingState.direction;
-        source.pathingOutputs.distanceRatio = source.pathingState.distanceRatio;
-        source.pathingOutputs.totalDeviation = source.pathingState.totalDeviation;
+        source.publishSimulatedPathing();
     }
 }
 

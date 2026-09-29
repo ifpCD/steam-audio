@@ -38,6 +38,10 @@ namespace SphericalHarmonics
     float legendre(int n,
                    float x);
 
+    // Per-degree max-rE weights for a decoder truncated at the given order (Zotter & Frank 2012).
+    void maxREWeights(int order,
+                      float* weights);
+
     template <typename T>
     Vector3<T> convertedDirection(const Vector3f& direction);
 

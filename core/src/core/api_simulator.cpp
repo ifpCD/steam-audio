@@ -16,6 +16,7 @@
 
 #include "simulation_data.h"
 #include "simulation_manager.h"
+#include "sh.h"
 using namespace ipl;
 
 #include "phonon.h"
@@ -470,8 +471,11 @@ void CSource::getOutputs(IPLSimulationFlags flags,
 
     if (flags & IPL_SIMULATIONFLAGS_PATHING)
     {
+        auto& field = _source->pathingOutputs.field;
+
         memcpy(outputs->pathing.eqCoeffs, _source->pathingOutputs.eq, Bands::kNumBands * sizeof(float));
-        outputs->pathing.shCoeffs = _source->pathingOutputs.sh.data();
+        outputs->pathing.shCoeffs = field ? const_cast<float*>(reinterpret_cast<const float*>(&field->acquire())) : nullptr;
+        outputs->pathing.order = AmbisonicField::kMaxOrder;
     }
 }
 
@@ -502,41 +506,29 @@ IPLerror CContext::createSimulator(IPLSimulationSettings* settings,
 
 }
 
-IPLAPI void IPLCALL iplSourceSetCustomPathing(IPLSource source, IPLfloat32* eqCoeffs, IPLfloat32* shCoeffs)
+IPLAPI void IPLCALL iplSourceSetAmbisonicFieldBatch(IPLint32 numSources, IPLSource* sources, const IPLint32* bandOrders, const IPLfloat32* bandCoeffs)
 {
-    if (!source || !eqCoeffs || !shCoeffs)
-        return;
-
-    auto _source = reinterpret_cast<api::CSource*>(source)->mHandle.get();
-    if (!_source)
-        return;
-
-    memcpy(_source->pathingOutputs.eq, eqCoeffs, 3 * sizeof(float));
-    memcpy(_source->pathingOutputs.sh.data(), shCoeffs, _source->pathingOutputs.sh.totalSize() * sizeof(float));
-}
-
-IPLAPI void IPLCALL iplSourceSetCustomPathingBatch(IPLint32 numSources, IPLSource* sources, IPLfloat32* eqCoeffs, IPLfloat32* shCoeffs, IPLint32 shOrder)
-{
-    if (!sources || !eqCoeffs || !shCoeffs)
-        return;
-
-    int numShCoeffs = (shOrder + 1) * (shOrder + 1) * 3; 
-
-    for (int i = 0; i < numSources; ++i)
+    for (auto i = 0; i < numSources; ++i)
     {
-        if (!sources[i]) continue;
-        
+        if (!sources[i])
+            continue;
+
         auto _source = reinterpret_cast<api::CSource*>(sources[i])->mHandle.get();
-        if (!_source) continue;
+        if (!_source || !_source->pathingOutputs.field)
+            continue;
 
-        memcpy(_source->pathingOutputs.eq, &eqCoeffs[i * 3], 3 * sizeof(float));
+        auto& exchange = *_source->pathingOutputs.field;
+        auto& field = exchange.back();
+        auto orders = &bandOrders[i * Bands::kNumBands];
+        auto coeffs = &bandCoeffs[i * Bands::kNumBands * AmbisonicField::kMaxCoeffs];
 
-        int maxShCoeffs = _source->pathingOutputs.sh.totalSize();
-        if (maxShCoeffs > 0)
+        for (auto band = 0; band < Bands::kNumBands; ++band)
         {
-            int elementsToCopy = (numShCoeffs < maxShCoeffs) ? numShCoeffs : maxShCoeffs;
-            memcpy(_source->pathingOutputs.sh.data(), &shCoeffs[i * numShCoeffs], elementsToCopy * sizeof(float));
+            field.orders[band] = orders[band];
+            memcpy(field.coeffs[band], &coeffs[band * AmbisonicField::kMaxCoeffs], SphericalHarmonics::numCoeffsForOrder(orders[band]) * sizeof(float));
         }
+
+        exchange.publish();
     }
 }
 

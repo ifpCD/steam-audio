@@ -18,6 +18,7 @@
 
 #include "array.h"
 #include "vector.h"
+#include "virtual_speaker_layout.h"
 
 namespace ipl {
 
@@ -54,7 +55,7 @@ class IHRTFMap
 {
 public:
     static const int kNumEars = 2;
-    static const int kMaxAmbisonicsOrder = 3;   // Limited to 3 because we use 24 virtual speakers for decoding.
+    static const int kMaxAmbisonicsOrder = VirtualSpeakerLayout::kExactOrder;
 
 public:
     virtual ~IHRTFMap()

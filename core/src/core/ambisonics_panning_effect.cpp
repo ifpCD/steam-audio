@@ -18,6 +18,7 @@
 #include "panning_effect.h"
 #include "profiler.h"
 #include "sh.h"
+#include "virtual_speaker_layout.h"
 
 namespace ipl {
 
@@ -25,67 +26,46 @@ namespace ipl {
 // AmbisonicsPanningEffect
 // --------------------------------------------------------------------------------------------------------------------
 
-// Virtual speaker positions obtained from:
-// http://neilsloane.com/sphdesigns/dim3/des.3.24.7.txt
-const Vector3f AmbisonicsPanningEffect::kVirtualSpeakers[AmbisonicsPanningEffect::kNumVirtualSpeakers] = {
-    { .8662468181078205913835980f, .4225186537611115291185464f, .2666354015167047203315344f },
-    { .8662468181078205913835980f, -.4225186537611115291185464f, -.2666354015167047203315344f },
-    { .8662468181078205913835980f, .2666354015167047203315344f, -.4225186537611115291185464f },
-    { .8662468181078205913835980f, -.2666354015167047203315344f, .4225186537611115291185464f },
-    { -.8662468181078205913835980f, .4225186537611115291185464f, -.2666354015167047203315344f },
-    { -.8662468181078205913835980f, -.4225186537611115291185464f, .2666354015167047203315344f },
-    { -.8662468181078205913835980f, .2666354015167047203315344f, .4225186537611115291185464f },
-    { -.8662468181078205913835980f, -.2666354015167047203315344f, -.4225186537611115291185464f },
-    { .2666354015167047203315344f, .8662468181078205913835980f, .4225186537611115291185464f },
-    { -.2666354015167047203315344f, .8662468181078205913835980f, -.4225186537611115291185464f },
-    { -.4225186537611115291185464f, .8662468181078205913835980f, .2666354015167047203315344f },
-    { .4225186537611115291185464f, .8662468181078205913835980f, -.2666354015167047203315344f },
-    { -.2666354015167047203315344f, -.8662468181078205913835980f, .4225186537611115291185464f },
-    { .2666354015167047203315344f, -.8662468181078205913835980f, -.4225186537611115291185464f },
-    { .4225186537611115291185464f, -.8662468181078205913835980f, .2666354015167047203315344f },
-    { -.4225186537611115291185464f, -.8662468181078205913835980f, -.2666354015167047203315344f },
-    { .4225186537611115291185464f, .2666354015167047203315344f, .8662468181078205913835980f },
-    { -.4225186537611115291185464f, -.2666354015167047203315344f, .8662468181078205913835980f },
-    { .2666354015167047203315344f, -.4225186537611115291185464f, .8662468181078205913835980f },
-    { -.2666354015167047203315344f, .4225186537611115291185464f, .8662468181078205913835980f },
-    { .4225186537611115291185464f, -.2666354015167047203315344f, -.8662468181078205913835980f },
-    { -.4225186537611115291185464f, .2666354015167047203315344f, -.8662468181078205913835980f },
-    { .2666354015167047203315344f, .4225186537611115291185464f, -.8662468181078205913835980f },
-    { -.2666354015167047203315344f, -.4225186537611115291185464f, -.8662468181078205913835980f }
-};
-
 AmbisonicsPanningEffect::AmbisonicsPanningEffect(const AudioSettings& audioSettings,
                                                  const AmbisonicsPanningEffectSettings& effectSettings)
     : mSpeakerLayout(*effectSettings.speakerLayout)
     , mMaxOrder(effectSettings.maxOrder)
-    , mAmbisonicsToSpeakersMatrix(effectSettings.speakerLayout->numSpeakers, SphericalHarmonics::numCoeffsForOrder(effectSettings.maxOrder))
     , mAmbisonicsVectors(SphericalHarmonics::numCoeffsForOrder(effectSettings.maxOrder), audioSettings.frameSize)
     , mSpeakersVectors(effectSettings.speakerLayout->numSpeakers, audioSettings.frameSize)
 {
-    DynamicMatrixf ambisonicsToVirtualSpeakersMatrix(kNumVirtualSpeakers, SphericalHarmonics::numCoeffsForOrder(effectSettings.maxOrder));
+    buildDecoder(*effectSettings.speakerLayout, effectSettings.maxOrder, mAmbisonicsToSpeakersMatrix);
+}
 
-    for (auto l = 0, i = 0; l <= effectSettings.maxOrder; ++l)
+void AmbisonicsPanningEffect::buildDecoder(const SpeakerLayout& speakerLayout,
+                                           int order,
+                                           DynamicMatrixf& decoder)
+{
+    decoder = DynamicMatrixf(speakerLayout.numSpeakers, SphericalHarmonics::numCoeffsForOrder(order));
+
+    DynamicMatrixf ambisonicsToVirtualSpeakersMatrix(VirtualSpeakerLayout::kCount, SphericalHarmonics::numCoeffsForOrder(order));
+
+    for (auto l = 0, i = 0; l <= order; ++l)
     {
         for (auto m = -l; m <= l; ++m, ++i)
         {
-            for (auto j = 0; j < kNumVirtualSpeakers; ++j)
+            for (auto j = 0; j < VirtualSpeakerLayout::kCount; ++j)
             {
-                ambisonicsToVirtualSpeakersMatrix(j, i) = SphericalHarmonics::evaluate(l, m, Vector3f::unitVector(kVirtualSpeakers[j]));
+                ambisonicsToVirtualSpeakersMatrix(j, i) = SphericalHarmonics::evaluate(l, m, VirtualSpeakerLayout::kDirections[j]);
             }
         }
     }
 
-    DynamicMatrixf virtualSpeakersToSpeakersMatrix(effectSettings.speakerLayout->numSpeakers, kNumVirtualSpeakers);
+    DynamicMatrixf virtualSpeakersToSpeakersMatrix(speakerLayout.numSpeakers, VirtualSpeakerLayout::kCount);
 
-    for (auto i = 0; i < kNumVirtualSpeakers; ++i)
+    for (auto i = 0; i < VirtualSpeakerLayout::kCount; ++i)
     {
-        for (auto j = 0; j < effectSettings.speakerLayout->numSpeakers; ++j)
+        for (auto j = 0; j < speakerLayout.numSpeakers; ++j)
         {
-            virtualSpeakersToSpeakersMatrix(j, i) = (4.0f * Math::kPi / kNumVirtualSpeakers) * PanningEffect::panningWeight(kVirtualSpeakers[i], *effectSettings.speakerLayout, j);
+            virtualSpeakersToSpeakersMatrix(j, i) = (4.0f * Math::kPi / VirtualSpeakerLayout::kCount) * PanningEffect::panningWeight(VirtualSpeakerLayout::kDirections[i], speakerLayout, j);
         }
     }
 
-    multiplyMatrices(virtualSpeakersToSpeakersMatrix, ambisonicsToVirtualSpeakersMatrix, mAmbisonicsToSpeakersMatrix);
+    multiplyMatrices(virtualSpeakersToSpeakersMatrix, ambisonicsToVirtualSpeakersMatrix, decoder);
 }
 
 void AmbisonicsPanningEffect::reset()

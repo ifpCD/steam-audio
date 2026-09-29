@@ -15,6 +15,7 @@
 //
 
 #include "ambisonics_panning_effect.h"
+#include "virtual_speaker_layout.h"
 using namespace ipl;
 
 #include "phonon.h"
@@ -130,7 +131,7 @@ IPLerror CContext::createAmbisonicsPanningEffect(IPLAudioSettings* audioSettings
     if (audioSettings->samplingRate <= 0 || audioSettings->frameSize <= 0)
         return IPL_STATUS_FAILURE;
 
-    if (effectSettings->maxOrder < 0 || 3 < effectSettings->maxOrder)
+    if (effectSettings->maxOrder < 0 || VirtualSpeakerLayout::kExactOrder < effectSettings->maxOrder)
         return IPL_STATUS_FAILURE;
 
     try

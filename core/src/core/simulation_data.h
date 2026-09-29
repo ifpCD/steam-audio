@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "ambisonic_field.h"
 #include "baked_reflection_data.h"
 #include "direct_effect.h"
 #include "hybrid_reverb_effect.h"
@@ -118,7 +119,7 @@ struct PathingSimulationState
 struct PathingSimulationOutputs
 {
     float eq[Bands::kNumBands];
-    Array<float> sh;
+    unique_ptr<AmbisonicFieldExchange> field;
     Vector3f direction;
     float distanceRatio;
     float totalDeviation;
@@ -154,6 +155,8 @@ public:
     ~SimulationData();
 
     bool hasSourceChanged() const;
+
+    void publishSimulatedPathing();
 };
 
 }

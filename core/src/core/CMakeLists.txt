@@ -161,6 +161,8 @@ if (IPL_OS_WINDOWS AND IPL_CPU_X64)
         speaker_layout.cpp
         panning_effect.cpp
         ambisonics_panning_effect.cpp
+        virtual_speaker_layout.cpp
+        hrtf_database_ambisonics.cpp
         hrtf2sh.cpp
     )
 
@@ -250,6 +252,7 @@ add_library(core OBJECT
     sofa_hrtf_map.cpp
     hrtf_database.h
     hrtf_database.cpp
+    hrtf_database_ambisonics.cpp
     overlap_add_convolution_effect.h
     overlap_add_convolution_effect.cpp
     binaural_effect.h
@@ -260,6 +263,8 @@ add_library(core OBJECT
     ambisonics_encode_effect.cpp
     ambisonics_panning_effect.h
     ambisonics_panning_effect.cpp
+    virtual_speaker_layout.h
+    virtual_speaker_layout.cpp
     ambisonics_binaural_effect.h
     ambisonics_binaural_effect.cpp
     ambisonics_rotate_effect.h
@@ -377,6 +382,7 @@ add_library(core OBJECT
     path_data.fbs
     path_simulator.h
     path_simulator.cpp
+    ambisonic_field.h
     path_effect.h
     path_effect.cpp
 
