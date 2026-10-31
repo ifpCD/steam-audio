@@ -96,11 +96,21 @@ public:
 
     // Ambisonic HRTFs fitted separately for every truncation order (least squares, then magnitude least squares above
     // ~2 kHz), delayed by fieldDelay() samples, in the field FFT domain.
-    const complex_t* fieldHRTF(int ear,
-                               int order,
-                               int channel) const
+    // layout is what PathEffect's synthesis kernels stream:
+    //   [order][kFieldBlockBins-bin block][acn channel][ear][kFieldBlockBins interleaved complex]
+    // padding bins past fieldSpectrumSize() are 0, rows 256 B aligned.
+    static constexpr int kFieldBlockBins = 16;
+    static constexpr int kFieldEarFloats = 2 * kFieldBlockBins;
+    static constexpr int kFieldRowFloats = IHRTFMap::kNumEars * kFieldEarFloats;
+
+    const float* fieldHRTFBlocks(int order) const
     {
-        return mFieldHRTF[ear][fieldIndex(order, channel)];
+        return &mFieldHRTF[static_cast<size_t>(fieldIndex(order, 0)) * mNumFieldBlocks * kFieldRowFloats];
+    }
+
+    int numFieldBlocks() const
+    {
+        return mNumFieldBlocks;
     }
 
     int fieldIRSize() const
@@ -130,6 +140,7 @@ private:
     FFT mFFTInterpolation; // FFT for interpolation and min-phase conversion. #samples -> #spectrumsamples.
     FFT mFFTAudioProcessing; // FFT for audio processing. #paddedsamples (= #windowedframesamples + #samples - 1) -> #paddedspectrumsamples.
     FFT mFFTField; // FFT for per-order ambisonic field HRIRs. 2 * #interpolationsamples -> #fieldspectrumsamples.
+    int mNumFieldBlocks; // ceil(#fieldspectrumsamples / kFieldBlockBins)
     Array<complex_t, 3> mHRTF; // HRTFs. #ears * #measurements * #paddedspectrumsamples.
     Array<int, 2> mPeakDelay; // Index of peaks in each HRIR. #ears * #measurements.
     Array<float, 3> mHRTFMagnitude; // HRTF magnitude. #ears * #measurements * #spectrumsamples.
@@ -139,7 +150,7 @@ private:
     Array<complex_t, 2> mInterpolatedHRTF; // Interpolated HRTF. #ears * #spectrumsamples.
     Array<float, 2> mInterpolatedHRIR; // Interpolated HRIR. #ears * #paddedsamples. TODO: check
     Array<complex_t, 3> mAmbisonicsHRTF; // Ambisonics HRTFs. #ears * #coefficients * #paddedspectrumsamples.
-    Array<complex_t, 3> mFieldHRTF; // Per-order ambisonic HRTFs. #ears * sum over orders of #coefficients * #fieldspectrumsamples.
+    Array<float> mFieldHRTF; // per-order field HRTFs, layout at fieldHRTFBlocks()
     float mReferenceLoudness; // Reference loudness of front HRIR.
 
     // Applies a normalization and volume scaling to the loaded HRIRs. Performs no normalization if HRTFNormType::None is selected.
@@ -183,6 +194,12 @@ private:
     void fitFieldHRTFs(const Array<complex_t, 3>& sampled,
                        const Array<float, 2>& basis,
                        const Array<complex_t, 3>& projected);
+
+    // one channel/ear spectrum -> blocked layout
+    void storeFieldHRTF(int order,
+                        int channel,
+                        int ear,
+                        const complex_t* spectrum);
 
     // Returns the peak index for a single HRIR for a single ear.
     static int extractPeakDelay(const float* in,

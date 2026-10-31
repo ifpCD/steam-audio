@@ -352,92 +352,77 @@ namespace sh
             }
         }
 
+        // NOTE: raw pointers into the band matrices, math kept in double like the old
+        // DynamicMatrixf path -> band matrices come out bit-identical to it.
+
         // [4] uses an odd convention of referring to the rows and columns using
         // centered indices, so the middle row and column are (0, 0) and the upper
-        // left would have negative coordinates.
-        //
-        // This is a convenience function to allow us to access an DynamicMatrixd
-        // in the same manner, assuming r is a (2l+1)x(2l+1) matrix.
-        double GetCenteredElement(const DynamicMatrixf& r, int i, int j) 
+        // left would have negative coordinates. (DynamicMatrixf is column-major.)
+        inline double CenteredElement(const float* band, int l, int i, int j)
         {
-            // The shift to go from [-l, l] to [0, 2l] is (rows - 1) / 2 = l,
-            // (since the matrix is assumed to be square, rows == cols).
-            int offset = (static_cast<int>(r.numRows) - 1) / 2;
-            return r(i + offset, j + offset);
+            return band[(j + l) * (2 * l + 1) + (i + l)];
         }
 
         // P is a helper function defined in [4] that is used by the functions U, V, W.
         // This should not be called on its own, as U, V, and W (and their coefficients)
         // select the appropriate matrix elements to access (arguments @a and @b).
-        double P(int i, int a, int b, int l, const vector<DynamicMatrixf>& r)
+        // r1 = band 1, rp = band l - 1.
+        inline double P(const float* r1, const float* rp, int i, int a, int b, int l)
         {
-            if (b == l) 
+            if (b == l)
             {
-                return GetCenteredElement(r[1], i, 1) * GetCenteredElement(r[l - 1], a, l - 1) - GetCenteredElement(r[1], i, -1) * 
-                    GetCenteredElement(r[l - 1], a, -l + 1);
+                return CenteredElement(r1, 1, i, 1) * CenteredElement(rp, l - 1, a, l - 1) -
+                    CenteredElement(r1, 1, i, -1) * CenteredElement(rp, l - 1, a, -l + 1);
             }
-            else if (b == -l) 
+            else if (b == -l)
             {
-                return GetCenteredElement(r[1], i, 1) * GetCenteredElement(r[l - 1], a, -l + 1) + GetCenteredElement(r[1], i, -1) * 
-                    GetCenteredElement(r[l - 1], a, l - 1);
+                return CenteredElement(r1, 1, i, 1) * CenteredElement(rp, l - 1, a, -l + 1) +
+                    CenteredElement(r1, 1, i, -1) * CenteredElement(rp, l - 1, a, l - 1);
             }
-            else 
+            else
             {
-                return GetCenteredElement(r[1], i, 0) * GetCenteredElement(r[l - 1], a, b);
+                return CenteredElement(r1, 1, i, 0) * CenteredElement(rp, l - 1, a, b);
             }
         }
 
-        // The functions U, V, and W should only be called if the correspondingly
-        // named coefficient u, v, w from the function ComputeUVWCoeff() is non-zero.
-        // When the coefficient is 0, these would attempt to access matrix elements that
-        // are out of bounds. The list of rotations, @r, must have the @l - 1
-        // previously completed band rotations. These functions are valid for l >= 2.
-
-        double U(int m, int n, int l, const vector<DynamicMatrixf>& r)
+        inline double U(const float* r1, const float* rp, int m, int n, int l)
         {
             // Although [1, 4] split U into three cases for m == 0, m < 0, m > 0
             // the actual values are the same for all three cases
-            return P(0, m, n, l, r);
+            return P(r1, rp, 0, m, n, l);
         }
 
-        double V(int m, int n, int l, const vector<DynamicMatrixf>& r)
+        inline double V(const float* r1, const float* rp, int m, int n, int l)
         {
-            if (m == 0) 
-            {
-                return P(1, 1, n, l, r) + P(-1, -1, n, l, r);
-            }
-            else if (m > 0) 
-            {
-                return P(1, m - 1, n, l, r) * sqrt(1 + KroneckerDelta(m, 1)) - P(-1, -m + 1, n, l, r) * (1 - KroneckerDelta(m, 1));
-            }
-            else 
-            {
-                // Note there is apparent errata in [1,4,4b] dealing with this particular
-                // case. [4b] writes it should be P*(1-d)+P*(1-d)^0.5
-                // [1] writes it as P*(1+d)+P*(1-d)^0.5, but going through the math by hand,
-                // you must have it as P*(1-d)+P*(1+d)^0.5 to form a 2^.5 term, which
-                // parallels the case where m > 0.
-                return P(1, m + 1, n, l, r) * (1 - KroneckerDelta(m, -1)) + P(-1, -m - 1, n, l, r) * sqrt(1 + KroneckerDelta(m, -1));
-            }
+            // sqrt(1 + d(m, +-1)) -> sqrt(2) at m == +-1, where the (1 - d) term is 0.
+            //
+            // Note there is apparent errata in [1,4,4b] dealing with the m < 0 case.
+            // [4b] writes it should be P*(1-d)+P*(1-d)^0.5
+            // [1] writes it as P*(1+d)+P*(1-d)^0.5, but going through the math by hand,
+            // you must have it as P*(1-d)+P*(1+d)^0.5 to form a 2^.5 term, which
+            // parallels the case where m > 0.
+            const auto kSqrt2 = 1.41421356237309505;
+
+            if (m == 0)
+                return P(r1, rp, 1, 1, n, l) + P(r1, rp, -1, -1, n, l);
+            else if (m == 1)
+                return kSqrt2 * P(r1, rp, 1, 0, n, l);
+            else if (m > 1)
+                return P(r1, rp, 1, m - 1, n, l) - P(r1, rp, -1, -m + 1, n, l);
+            else if (m == -1)
+                return kSqrt2 * P(r1, rp, -1, 0, n, l);
+            else
+                return P(r1, rp, 1, m + 1, n, l) + P(r1, rp, -1, -m - 1, n, l);
         }
 
-        double W(int m, int n, int l, const vector<DynamicMatrixf>& r) 
+        inline double W(const float* r1, const float* rp, int m, int n, int l)
         {
-            if (m == 0) 
-            {
-                // whenever this happens, w is also 0 so W can be anything
-                return 0.0;
-            }
-            else if (m > 0) 
-            {
-                return P(1, m + 1, n, l, r) + P(-1, -m - 1, n, l, r);
-            }
-            else 
-            {
-                return P(1, m - 1, n, l, r) - P(-1, -m + 1, n, l, r);
-            }
+            // m == 0 never gets here, w is 0
+            if (m > 0)
+                return P(r1, rp, 1, m + 1, n, l) + P(r1, rp, -1, -m - 1, n, l);
+            else
+                return P(r1, rp, 1, m - 1, n, l) - P(r1, rp, -1, -m + 1, n, l);
         }
-
 
         // Calculate the coefficients applied to the U, V, and W functions. Because
         // their equations share many common terms they are computed simultaneously.
@@ -451,34 +436,71 @@ namespace sh
             *w = -0.5 * sqrt((l - abs(m) - 1) * (l - abs(m)) / denom) * (1 - d);
         }
 
+        // 3 * sum_{k=2}^{l-1} (2k+1)^2, l >= 2
+        int UVWTableOffset(int l)
+        {
+            return l * (4 * l * l - 1) - 30;
+        }
+
+        // u, v, w only depend on (l, m, n) -> once per Rotation, not per SetRotation.
+        // zero terms stored as exact 0 so U/V/W never index outside band l - 1.
+        // order matches ComputeBandRotation's walk.
+        vector<double> ComputeUVWTable(int order)
+        {
+            vector<double> table(std::max(UVWTableOffset(order + 1), 0));
+
+            for (int l = 2; l <= order; l++)
+            {
+                auto* entry = &table[UVWTableOffset(l)];
+
+                for (int n = -l; n <= l; n++)
+                {
+                    for (int m = -l; m <= l; m++, entry += 3)
+                    {
+                        double u, v, w;
+                        ComputeUVWCoeff(m, n, l, &u, &v, &w);
+
+                        entry[0] = NearByMargin(u, 0.0) ? 0.0 : u;
+                        entry[1] = NearByMargin(v, 0.0) ? 0.0 : v;
+                        entry[2] = NearByMargin(w, 0.0) ? 0.0 : w;
+                    }
+                }
+            }
+
+            return table;
+        }
+
         // Calculate the (2l+1)x(2l+1) rotation matrix for the band @l.
         // This uses the matrices computed for band 1 and band l-1 to compute the
         // matrix for band l. @rotations must contain the previously computed l-1
-        // rotation matrices, and the new matrix for band l will be appended to it.
+        // rotation matrices, and the new matrix for band l will be written to it.
+        // @uvw -> band l's entries in the uvw table.
         //
         // This implementation comes from p. 5 (6346), Table 1 and 2 in [4] taking
         // into account the corrections from [4b].
-        void ComputeBandRotation(int l, vector<DynamicMatrixf>* rotations) 
+        void ComputeBandRotation(int l, const double* uvw, vector<DynamicMatrixf>* rotations)
         {
-            // The band's rotation matrix has rows and columns equal to the number of
-            // coefficients within that band (-l <= m <= l implies 2l + 1 coefficients).
-            for (int m = -l; m <= l; m++) 
+            const auto* r1 = (*rotations)[1].elements.data();
+            const auto* rp = (*rotations)[l - 1].elements.data();
+            auto* band = (*rotations)[l].elements.data();
+
+            // n outer -> sequential writes (column-major)
+            for (int n = -l; n <= l; n++)
             {
-                for (int n = -l; n <= l; n++) 
+                for (int m = -l; m <= l; m++, uvw += 3)
                 {
-                    double u, v, w;
-                    ComputeUVWCoeff(m, n, l, &u, &v, &w);
+                    auto value = 0.0;
 
                     // The functions U, V, W are only safe to call if the coefficients
                     // u, v, w are not zero
-                    if (!NearByMargin(u, 0.0))
-                        u *= U(m, n, l, *rotations);
-                    if (!NearByMargin(v, 0.0))
-                        v *= V(m, n, l, *rotations);
-                    if (!NearByMargin(w, 0.0))
-                        w *= W(m, n, l, *rotations);
+                    if (uvw[0] != 0.0)
+                        value += uvw[0] * U(r1, rp, m, n, l);
+                    if (uvw[1] != 0.0)
+                        value += uvw[1] * V(r1, rp, m, n, l);
+                    if (uvw[2] != 0.0)
+                        value += uvw[2] * W(r1, rp, m, n, l);
 
-                    ((*rotations)[l])(m + l, n + l) = static_cast<float>(u + v + w);
+                    *band++ = static_cast<float>(value);
                 }
             }
         }
@@ -872,7 +894,8 @@ namespace sh
     Rotation::Rotation(int order)
         : 
         order_(order), 
-        rotation_(Quaternionf())
+        rotation_(Quaternionf()),
+        uvw_table_(ComputeUVWTable(order))
     {
         for (auto l = 0; l <= order; ++l)
         {
@@ -894,8 +917,8 @@ namespace sh
             band_rotations_[l] = rotation.band_rotations_[l];
 
         // Calculate remaining bands (automatically skipped if there are no more).
-        for (int l = rotation.order_ + 1; l <= order; l++) 
-            ComputeBandRotation(l, &band_rotations_);
+        for (int l = std::max(rotation.order_ + 1, 2); l <= order; l++) 
+            ComputeBandRotation(l, &uvw_table_[UVWTableOffset(l)], &band_rotations_);
     }
 
     void Rotation::SetRotation(const Quaternionf& quaternion)
@@ -947,7 +970,7 @@ namespace sh
         // Recursively build the remaining band rotations, using the equations
         // provided in [4, 4b].
         for (int l = 2; l <= order_; l++)
-            ComputeBandRotation(l, &band_rotations_);
+            ComputeBandRotation(l, &uvw_table_[UVWTableOffset(l)], &band_rotations_);
     }
 
     int Rotation::order() const 
@@ -982,11 +1005,29 @@ namespace sh
         // Because of orthogonality, the coefficients outside of each band do not
         // interact with one another. By separating them into band-specific matrices,
         // we take advantage of that sparsity.
+        // NOTE: column-major, so accumulate per column -> contiguous loads, same
+        // summation order as multiplyMatrixVector.
         auto offset = 0;
         for (int l = 0; l <= std::min(order, order_); l++)
         {
-            multiplyMatrixVector(band_rotations_[l], &coeff[offset], &result[offset]);
-            offset += 2 * l + 1;
+            const auto size = 2 * l + 1;
+            const auto* band = band_rotations_[l].elements.data();
+            const auto* in = &coeff[offset];
+            auto* out = &result[offset];
+
+            for (auto i = 0; i < size; ++i)
+                out[i] = band[i] * in[0];
+
+            for (auto j = 1; j < size; ++j)
+            {
+                const auto* column = &band[j * size];
+                const auto c = in[j];
+
+                for (auto i = 0; i < size; ++i)
+                    out[i] += column[i] * c;
+            }
+
+            offset += size;
         }
     }
 

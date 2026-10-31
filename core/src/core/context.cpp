@@ -26,9 +26,74 @@
 
 #if defined(IPL_ENABLE_IPP) && (defined(IPL_OS_WINDOWS) || defined(IPL_OS_LINUX) || (defined(IPL_OS_MACOSX) && defined(IPL_CPU_X64)))
 #include <ipp.h>
+#elif defined(IPL_CPU_X86) || defined(IPL_CPU_X64)
+#include <algorithm>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#include <immintrin.h>
+#else
+#include <cpuid.h>
+#endif
 #endif
 
 namespace ipl {
+
+#if !(defined(IPL_ENABLE_IPP) && (defined(IPL_OS_WINDOWS) || defined(IPL_OS_LINUX) || (defined(IPL_OS_MACOSX) && defined(IPL_CPU_X64)))) && (defined(IPL_CPU_X86) || defined(IPL_CPU_X64))
+// no IPP to ask -> cpuid. AVX levels also need xgetbv: the OS has to save ymm/zmm, not just the cpu support them.
+// AVX2 also requires FMA3 here.
+static SIMDLevel detectSIMDLevel()
+{
+    unsigned int r[4] = {}; // eax ebx ecx edx
+
+    auto cpuid = [&r](unsigned int leaf)
+    {
+#if defined(_MSC_VER)
+        __cpuidex(reinterpret_cast<int*>(r), static_cast<int>(leaf), 0);
+#else
+        __cpuid_count(leaf, 0, r[0], r[1], r[2], r[3]);
+#endif
+    };
+
+    auto xcr0 = []() -> unsigned long long
+    {
+#if defined(_MSC_VER)
+        return _xgetbv(0);
+#else
+        unsigned int lo, hi;
+        __asm__ __volatile__("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+        return (static_cast<unsigned long long>(hi) << 32) | lo;
+#endif
+    };
+
+    cpuid(0);
+    const auto maxLeaf = r[0];
+
+    cpuid(1);
+    const auto sse42 = (r[2] & (1u << 20)) != 0;
+    const auto fma = (r[2] & (1u << 12)) != 0;
+    const auto osxsave = (r[2] & (1u << 27)) != 0;
+    const auto avx = (r[2] & (1u << 28)) != 0;
+
+    auto leaf7 = 0u;
+    if (maxLeaf >= 7)
+    {
+        cpuid(7);
+        leaf7 = r[1];
+    }
+
+    const auto xcr = osxsave ? xcr0() : 0ull;
+    const auto ymm = (xcr & 0x6) == 0x6;
+    const auto zmm = (xcr & 0xe6) == 0xe6;
+
+    if (avx && ymm && fma && (leaf7 & (1u << 5)))
+        return ((leaf7 & (1u << 16)) && zmm) ? SIMDLevel::AVX512 : SIMDLevel::AVX2;
+
+    if (avx && ymm)
+        return SIMDLevel::AVX;
+
+    return sse42 ? SIMDLevel::SSE4 : SIMDLevel::SSE2;
+}
+#endif
 
 // --------------------------------------------------------------------------------------------------------------------
 // Context
@@ -93,6 +158,8 @@ Context::Context(LogCallback logCallback,
 
     ippSetCpuFeatures(cpuFeatures);
 
+#elif defined(IPL_CPU_X86) || defined(IPL_CPU_X64)
+    sSIMDLevel = std::min(simdLevel, detectSIMDLevel());
 #endif
 }
 

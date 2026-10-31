@@ -518,6 +518,7 @@ if (STEAMAUDIO_ENABLE_AVX)
         float8_iir.cpp
         float8_delay.cpp
         float8_reverb_effect.cpp
+        float8_path_effect.cpp
     )
 	if (IPL_OS_WINDOWS)
         set_source_files_properties(
@@ -526,6 +527,12 @@ if (STEAMAUDIO_ENABLE_AVX)
             float8_reverb_effect.cpp
             PROPERTIES
                 COMPILE_FLAGS "/arch:AVX"
+        )
+        # AVX2 + FMA, only dispatched at SIMDLevel::AVX2
+        set_source_files_properties(
+            float8_path_effect.cpp
+            PROPERTIES
+                COMPILE_FLAGS "/arch:AVX2"
         )
 	endif()
 endif()

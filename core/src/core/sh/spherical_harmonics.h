@@ -154,9 +154,8 @@ namespace sh
         void SetRotation(const ipl::Matrix3x3f& rotation);
 
         // Transform the SH basis coefficients in @coeff by this rotation and store
-        // them into @result. These may be the same vector. The @result vector will
-        // be resized if necessary, but @coeffs must have its size equal to
-        // GetCoefficientCount(order()).
+        // them into @result.
+        // NOTE: @result must not alias @coeff. bands above min(@order, order()) untouched.
         //
         // This rotation transformation produces a set of coefficients that are equal
         // to the coefficients found by projecting the original function rotated by
@@ -190,5 +189,8 @@ namespace sh
         ipl::vector<ipl::DynamicMatrixf> band_rotations_;
         ipl::vector<ipl::DynamicMatrixf> band_coefficients_;
         ipl::vector<ipl::DynamicMatrixf> band_coefficients_rotated_;
+
+        // [4] u, v, w for bands 2..order_, see ComputeUVWTable
+        ipl::vector<double> uvw_table_;
     };
 }

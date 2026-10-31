@@ -506,7 +506,7 @@ IPLerror CContext::createSimulator(IPLSimulationSettings* settings,
 
 }
 
-IPLAPI void IPLCALL iplSourceSetAmbisonicFieldBatch(IPLint32 numSources, IPLSource* sources, const IPLint32* bandOrders, const IPLfloat32* bandCoeffs)
+IPLAPI void IPLCALL iplSourceSetAmbisonicFieldBatch(IPLint32 numSources, IPLSource* sources, const IPLint32* bandOrders, const IPLfloat32* bandCoeffs, const IPLuint8* sharedShapes)
 {
     for (auto i = 0; i < numSources; ++i)
     {
@@ -524,8 +524,40 @@ IPLAPI void IPLCALL iplSourceSetAmbisonicFieldBatch(IPLint32 numSources, IPLSour
 
         for (auto band = 0; band < Bands::kNumBands; ++band)
         {
-            field.orders[band] = orders[band];
-            memcpy(field.coeffs[band], &coeffs[band * AmbisonicField::kMaxCoeffs], SphericalHarmonics::numCoeffsForOrder(orders[band]) * sizeof(float));
+            auto order = std::min(std::max(static_cast<int>(orders[band]), 0), static_cast<int>(AmbisonicField::kMaxOrder));
+
+            field.orders[band] = order;
+            memcpy(field.coeffs[band], &coeffs[band * AmbisonicField::kMaxCoeffs], SphericalHarmonics::numCoeffsForOrder(order) * sizeof(float));
+        }
+
+        // encoder guarantees band b == k_b * shape. factor around the loudest omni term; no omni or mixed orders -> per band
+        field.sharedShape = false;
+
+        if (sharedShapes && sharedShapes[i])
+        {
+            auto reference = 0;
+            auto sameOrder = true;
+
+            for (auto band = 1; band < Bands::kNumBands; ++band)
+            {
+                if (fabsf(field.coeffs[band][0]) > fabsf(field.coeffs[reference][0]))
+                    reference = band;
+
+                sameOrder = sameOrder && (field.orders[band] == field.orders[0]);
+            }
+
+            auto omni = field.coeffs[reference][0];
+
+            if (omni != 0.0f && sameOrder)
+            {
+                for (auto band = 0; band < Bands::kNumBands; ++band)
+                {
+                    field.bandGains[band] = field.coeffs[band][0] / omni;
+                }
+
+                field.shapeBand = reference;
+                field.sharedShape = true;
+            }
         }
 
         exchange.publish();

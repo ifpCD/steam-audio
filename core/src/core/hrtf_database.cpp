@@ -40,6 +40,7 @@ HRTFDatabase::HRTFDatabase(const HRTFSettings& hrtfSettings,
     , mFFTInterpolation(mHRTFMap->numSamples())
     , mFFTAudioProcessing(frameSize + (frameSize / 4) + mHRTFMap->numSamples() - 1)
     , mFFTField(2 * mFFTInterpolation.numRealSamples)
+    , mNumFieldBlocks((mFFTField.numComplexSamples + kFieldBlockBins - 1) / kFieldBlockBins)
     , mHRTF(IHRTFMap::kNumEars, numHRIRs(), mFFTAudioProcessing.numComplexSamples)
     , mPeakDelay(IHRTFMap::kNumEars, numHRIRs())
     , mHRTFMagnitude(IHRTFMap::kNumEars, numHRIRs(), mFFTInterpolation.numComplexSamples)
@@ -49,7 +50,7 @@ HRTFDatabase::HRTFDatabase(const HRTFSettings& hrtfSettings,
     , mInterpolatedHRTF(IHRTFMap::kNumEars, mFFTInterpolation.numComplexSamples)
     , mInterpolatedHRIR(IHRTFMap::kNumEars, mFFTAudioProcessing.numRealSamples)
     , mAmbisonicsHRTF(IHRTFMap::kNumEars, SphericalHarmonics::numCoeffsForOrder(IHRTFMap::kMaxAmbisonicsOrder), mFFTAudioProcessing.numComplexSamples)
-    , mFieldHRTF(IHRTFMap::kNumEars, fieldIndex(IHRTFMap::kMaxAmbisonicsOrder + 1, 0), mFFTField.numComplexSamples)
+    , mFieldHRTF(static_cast<size_t>(fieldIndex(IHRTFMap::kMaxAmbisonicsOrder + 1, 0)) * mNumFieldBlocks * kFieldRowFloats)
 {
     updateReferenceLoudness(hrtfSettings.normType);
     applyVolumeSettings(hrtfSettings.volume, hrtfSettings.normType);

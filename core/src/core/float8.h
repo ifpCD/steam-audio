@@ -26,9 +26,14 @@
 
 #if ( defined(__clang__) || defined(__GNUC__) ) && ( defined(IPL_CPU_X86) || defined(IPL_CPU_X64) )
 #define IPL_FLOAT8_ATTR __attribute__((target("avx")))
+#define IPL_FLOAT8_FMA_ATTR __attribute__((target("avx2,fma")))
 #else
 #define IPL_FLOAT8_ATTR
+#define IPL_FLOAT8_FMA_ATTR
 #endif
+
+// IPL_FLOAT8_FMA_ATTR / float8::fmadd: only call at gSIMDLevel() >= AVX2 (AVX2 => FMA3, same assumption as IPP).
+// MSVC: /arch:AVX2 on the file.
 
 #if defined(IPL_CPU_X86) || defined(IPL_CPU_X64)
 #include "avx_float8.h"

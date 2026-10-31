@@ -124,6 +124,14 @@ namespace float8
         return _mm256_permute2f128_ps(x, x, 0x11);
     }
 
+    // FMA3, IPL_FLOAT8_FMA_ATTR callers only
+    inline IPL_FLOAT8_FMA_ATTR float8_t fmadd(float8_t a,
+                                              float8_t b,
+                                              float8_t c)
+    {
+        return _mm256_fmadd_ps(a, b, c);
+    }
+
     inline IPL_FLOAT8_ATTR void avoidTransitionPenalty()
     {
         _mm256_zeroupper();

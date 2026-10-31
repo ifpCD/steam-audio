@@ -13,13 +13,19 @@ namespace ipl {
 // --------------------------------------------------------------------------------------------------------------------
 
 // World-space, orthonormal ACN spherical harmonics per band; each band is truncated at its own order.
-struct AmbisonicField
+struct alignas(64) AmbisonicField
 {
     static constexpr int kMaxOrder = 10;
     static constexpr int kMaxCoeffs = (kMaxOrder + 1) * (kMaxOrder + 1);
 
     int32_t orders[Bands::kNumBands];
     float coeffs[Bands::kNumBands][kMaxCoeffs];
+
+    // for ray or distant object encodings where the shape is the same across all band sound fields.
+    // encoder's responsibility
+    bool sharedShape;
+    int32_t shapeBand;
+    float bandGains[Bands::kNumBands];
 };
 
 
@@ -62,9 +68,9 @@ private:
     static constexpr uint32_t kFresh = 4;
 
     AmbisonicField mSlots[3];
-    std::atomic<uint32_t> mShared;
-    uint32_t mBack;
-    uint32_t mFront;
+    alignas(64) std::atomic<uint32_t> mShared;  // the only line both threads write
+    alignas(64) uint32_t mBack;                 // producer only
+    alignas(64) uint32_t mFront;                // consumer only
 };
 
 }

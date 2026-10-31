@@ -4228,11 +4228,16 @@ IPLAPI void IPLCALL iplSimulatorRunPathing(IPLSimulator simulator);
 
 /** Publishes per-band ambisonic fields rendered by the path effect of each source (sources need pathing allocated).
 
-    \param  bandOrders  \c numSources x \c IPL_NUM_BANDS orders, each in [0, \c IPL_AMBISONIC_FIELD_MAX_ORDER].
+    \param  bandOrders  \c numSources x \c IPL_NUM_BANDS orders, each in [0, \c IPL_AMBISONIC_FIELD_MAX_ORDER]; orders
+                        outside that range are clamped to it.
     \param  bandCoeffs  \c numSources x \c IPL_NUM_BANDS x \c IPL_AMBISONIC_FIELD_MAX_COEFFS world-space, orthonormal
                         ACN coefficients; only the first (order + 1)^2 of each band are read.
+    \param  sharedShapes    Optional, may be \c NULL. \c numSources flags; nonzero means the encoder guarantees every
+                            band of that source is the same shape at the same order, scaled per band (e.g. a point source
+                            with distance attenuation and air absorption). Those fields are rendered with one rotation
+                            and one HRTF synthesis instead of one per band; the band scales are read from the omni terms.
 */
-IPLAPI void IPLCALL iplSourceSetAmbisonicFieldBatch(IPLint32 numSources, IPLSource* sources, const IPLint32* bandOrders, const IPLfloat32* bandCoeffs);
+IPLAPI void IPLCALL iplSourceSetAmbisonicFieldBatch(IPLint32 numSources, IPLSource* sources, const IPLint32* bandOrders, const IPLfloat32* bandCoeffs, const IPLuint8* sharedShapes);
 
 IPLAPI void IPLCALL iplSourceSetCustomDirectBatch(IPLint32 numSources, IPLSource* sources, IPLVector3* positions, IPLfloat32* occlusions, IPLfloat32* transmissions);
 

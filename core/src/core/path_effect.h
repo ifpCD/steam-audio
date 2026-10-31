@@ -68,6 +68,17 @@ private:
     static constexpr int kMaxChannels = AmbisonicField::kMaxCoeffs;
     static constexpr float kCrossoverOctaves = 1.0f;
 
+    // left/right += weights * sum_i coeffs[i] * H_i over blocks [firstBlock, endBlock), H_i from fieldHRTFBlocks(order).
+    // weights/left/right: interleaved complex, indexed from bin 0, 32 B aligned.
+    typedef void (*AccumulateFieldHRTF)(const float* blocks,
+                                        int numCoeffs,
+                                        const float* coeffs,
+                                        int firstBlock,
+                                        int endBlock,
+                                        const float* weights,
+                                        float* left,
+                                        float* right);
+
     int mSamplingRate;
     int mFrameSize;
     bool mSpatialize;
@@ -75,16 +86,21 @@ private:
 
     int mOrders[Bands::kNumBands];
     float mCoeffs[Bands::kNumBands][AmbisonicField::kMaxCoeffs];
+    bool mSharedShape; // mCoeffs[b] == mBandGains[b] * mShape
+    float mShape[AmbisonicField::kMaxCoeffs];
+    float mBandGains[Bands::kNumBands];
 
     unique_ptr<FFT> mFieldFFT;
     unique_ptr<FFT> mConvolutionFFT;
     unique_ptr<OverlapAddConvolutionEffect> mConvolution;
-    int mSupport[Bands::kNumBands][2]; // First and one-past-last field spectrum bin with nonzero crossover weight.
-    Array<float, 2> mCrossover; // Band weights summing to 1. #bands * #fieldspectrumsamples.
-    Array<complex_t, 2> mBandHRTF; // #bands * #fieldspectrumsamples.
-    Array<complex_t> mFieldHRTF; // #fieldspectrumsamples.
-    Array<float> mHRIR; // #convolutionsamples.
+    int mNumFieldBlocks; // == hrtf->numFieldBlocks()
+    int mBlockRange[Bands::kNumBands][2]; // [first, end) block with nonzero crossover weight
+    Array<float, 2> mCrossover; // #bands * 2 * #fieldblockbins, weights sum to 1, duplicated for re/im
+    Array<float> mSharedWeights; // sum_b gain_b * crossover_b, same layout
+    Array<complex_t, 2> mFieldHRTF; // #ears * #fieldblockbins, ifft only reads #fieldspectrumsamples
+    Array<float> mHRIR; // #convolutionsamples. tail past the field IR stays 0, ifft only writes the head
     Array<complex_t, 2> mHRTF; // #ears * #convolutionspectrumsamples.
+    AccumulateFieldHRTF mAccumulateFieldHRTF; // float4/float8, picked in ctor from gSIMDLevel()
 
     IIRFilterer mBandFilters[Bands::kNumBands];
     Array<float, 2> mBandSignals; // #bands * #samples.
@@ -106,6 +122,26 @@ private:
     void applyGains(bool decode,
                     const AudioBuffer& in,
                     AudioBuffer& out);
+
+    static void accumulateFieldHRTF_float4(const float* blocks,
+                                           int numCoeffs,
+                                           const float* coeffs,
+                                           int firstBlock,
+                                           int endBlock,
+                                           const float* weights,
+                                           float* left,
+                                           float* right);
+
+#if defined(IPL_ENABLE_FLOAT8)
+    static void accumulateFieldHRTF_float8(const float* blocks,
+                                           int numCoeffs,
+                                           const float* coeffs,
+                                           int firstBlock,
+                                           int endBlock,
+                                           const float* weights,
+                                           float* left,
+                                           float* right);
+#endif
 };
 
 }

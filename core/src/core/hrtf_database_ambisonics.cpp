@@ -97,6 +97,7 @@ void HRTFDatabase::fitFieldHRTFs(const Array<complex_t, 3>& sampled,
     Array<complex_t> target(numSpeakers);
     Array<float> hrir(irSize);
     Array<float> fieldHRIR(mFFTField.numRealSamples);
+    Array<complex_t> fieldSpectrum(mFFTField.numComplexSamples);
 
     auto bulkDelay = 0.0f;
 
@@ -173,8 +174,33 @@ void HRTFDatabase::fitFieldHRTFs(const Array<complex_t, 3>& sampled,
                     fieldHRIR[delay + t] = hrir[(t + irSize) % irSize];
                 }
 
-                mFFTField.applyForward(fieldHRIR.data(), mFieldHRTF[ear][fieldIndex(order, i)]);
+                mFFTField.applyForward(fieldHRIR.data(), fieldSpectrum.data());
+                storeFieldHRTF(order, i, ear, fieldSpectrum.data());
             }
+        }
+    }
+}
+
+void HRTFDatabase::storeFieldHRTF(int order,
+                                  int channel,
+                                  int ear,
+                                  const complex_t* spectrum)
+{
+    const auto numBins = mFFTField.numComplexSamples;
+    const auto numCoeffs = SphericalHarmonics::numCoeffsForOrder(order);
+    auto* blocks = &mFieldHRTF[static_cast<size_t>(fieldIndex(order, 0)) * mNumFieldBlocks * kFieldRowFloats];
+
+    for (auto block = 0; block < mNumFieldBlocks; ++block)
+    {
+        auto* row = &blocks[(static_cast<size_t>(block) * numCoeffs + channel) * kFieldRowFloats + ear * kFieldEarFloats];
+
+        for (auto k = 0; k < kFieldBlockBins; ++k)
+        {
+            const auto bin = block * kFieldBlockBins + k;
+            const auto value = (bin < numBins) ? spectrum[bin] : complex_t(0.0f, 0.0f);
+
+            row[2 * k] = value.real();
+            row[2 * k + 1] = value.imag();
         }
     }
 }

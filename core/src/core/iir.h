@@ -145,7 +145,8 @@ private:
     float mYm2; // Output value from 2 samples ago.
     alignas(float4_t) float mCoeffs4[8][4]; // Filter coefficient matrix for SIMD acceleration, precomputed in setFilter.
 #if defined(IPL_ENABLE_FLOAT8)
-    alignas(float8_t) float mCoeffs8[12][8]; // Filter coefficient matrix for SIMD acceleration, precomputed in setFilter.
+    // NOTE: alignas(32), not alignas(float8_t) - gcc only aligns __m256 to 16 in TUs built without -mavx.
+    alignas(32) float mCoeffs8[12][8]; // Filter coefficient matrix for SIMD acceleration, precomputed in setFilter.
 #endif
 
     void (IIR2Filterer::* mResetFilterDispatch)();
