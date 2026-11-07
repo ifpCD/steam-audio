@@ -134,6 +134,34 @@ public:
         return order * (order + 1) * (2 * order + 1) / 6 + channel;
     }
 
+    // MagLS replaces the least-squares fit above a cutoff that follows N = kr within these bounds.
+    static constexpr float kFieldMagnitudeCutoffMin = 1500.0f;
+    static constexpr float kFieldMagnitudeCutoffMax = 2000.0f;
+
+    // High-frequency arrival time per ear over direction, in samples relative to its mean over directions and ears, as
+    // SH coefficients up to kFieldDelayOrder. MagLS continues every direction's phase along the set's bulk delay, so
+    // above the cutoff a synthesized field reaches both ears at that mean time: no envelope ITD. The arrival time a
+    // field g implies at one ear is integral(g tau) / integral(g), linear in the field, so PathEffect evaluates it with
+    // one dot product per ear and restores it as group delay above the cutoff.
+    static constexpr int kFieldDelayOrder = 4;
+    static constexpr int kFieldDelayCoeffs = (kFieldDelayOrder + 1) * (kFieldDelayOrder + 1);
+
+    const float* fieldDelayCoeffs(int ear) const
+    {
+        return mFieldDelayCoeffs[ear];
+    }
+
+    // arrival times seen over the virtual speakers, for clamping what a field implies
+    float fieldDelayMin(int ear) const
+    {
+        return mFieldDelayRange[ear][0];
+    }
+
+    float fieldDelayMax(int ear) const
+    {
+        return mFieldDelayRange[ear][1];
+    }
+
 private:
     int mSamplingRate;
     unique_ptr<IHRTFMap> mHRTFMap; // IHRTFMap containing loaded HRTF data.
@@ -151,6 +179,8 @@ private:
     Array<float, 2> mInterpolatedHRIR; // Interpolated HRIR. #ears * #paddedsamples. TODO: check
     Array<complex_t, 3> mAmbisonicsHRTF; // Ambisonics HRTFs. #ears * #coefficients * #paddedspectrumsamples.
     Array<float> mFieldHRTF; // per-order field HRTFs, layout at fieldHRTFBlocks()
+    float mFieldDelayCoeffs[IHRTFMap::kNumEars][kFieldDelayCoeffs]; // see fieldDelayCoeffs()
+    float mFieldDelayRange[IHRTFMap::kNumEars][2]; // [min, max] over the virtual speakers
     float mReferenceLoudness; // Reference loudness of front HRIR.
 
     // Applies a normalization and volume scaling to the loaded HRIRs. Performs no normalization if HRTFNormType::None is selected.
@@ -194,6 +224,9 @@ private:
     void fitFieldHRTFs(const Array<complex_t, 3>& sampled,
                        const Array<float, 2>& basis,
                        const Array<complex_t, 3>& projected);
+
+    void fitFieldDelays(const Array<complex_t, 3>& sampled,
+                        const Array<float, 2>& basis);
 
     // one channel/ear spectrum -> blocked layout
     void storeFieldHRTF(int order,

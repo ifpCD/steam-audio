@@ -48,6 +48,8 @@ struct PathEffectParams
 
 // Renders a per-band ambisonic field. Binaural rendering is a single HRTF convolution whose spherical harmonic weights
 // cross over between bands in frequency; speaker and raw Ambisonic rendering split the input with IIR band filters.
+// Binaural renders the field as given (no max-rE): the per-order MagLS tables are fitted for unweighted input, and any
+// taper on top only costs magnitude, ILD and low-frequency ITD accuracy. Spatial smoothing is the encoder's call.
 class PathEffect
 {
 public:
@@ -67,6 +69,11 @@ public:
 private:
     static constexpr int kMaxChannels = AmbisonicField::kMaxCoeffs;
     static constexpr float kCrossoverOctaves = 1.0f;
+
+    // group delay restored above the MagLS cutoff, ramped in over this many octaves (raised cosine in log frequency)
+    static constexpr float kGroupDelayRampOctaves = 0.5f;
+    // bands are weighted by their crossover share of [cutoff, this) when a per-band field sets the group delay
+    static constexpr float kGroupDelayBandHigh = 8000.0f;
 
     // left/right += weights * sum_i coeffs[i] * H_i over blocks [firstBlock, endBlock), H_i from fieldHRTFBlocks(order).
     // weights/left/right: interleaved complex, indexed from bin 0, 32 B aligned.
@@ -101,6 +108,12 @@ private:
     Array<float> mHRIR; // #convolutionsamples. tail past the field IR stays 0, ifft only writes the head
     Array<complex_t, 2> mHRTF; // #ears * #convolutionspectrumsamples.
     AccumulateFieldHRTF mAccumulateFieldHRTF; // float4/float8, picked in ctor from gSIMDLevel()
+    int mConvolutionIRSize; // leading field IR samples convolved, see ctor
+
+    Array<float> mGroupDelayPhase; // #fieldspectrumsamples. phase (rad) per sample of group delay, 0 below the cutoff
+    int mGroupDelayFirstBin; // first bin the ramp touches
+    int mGroupDelayLinearBin; // first bin past the ramp: phase grows by 2pi / #fieldsamples per bin from here
+    float mGroupDelayBandWeights[Bands::kNumBands];
 
     IIRFilterer mBandFilters[Bands::kNumBands];
     Array<float, 2> mBandSignals; // #bands * #samples.
@@ -114,6 +127,11 @@ private:
                    bool maxRE);
 
     void buildCrossover();
+
+    void buildGroupDelay();
+
+    // per ear, the high-frequency arrival time the loaded field implies, restored as group delay above the MagLS cutoff
+    void continueGroupDelay(const HRTFDatabase& hrtf);
 
     AudioEffectState applyBinaural(const HRTFDatabase& hrtf,
                                    const AudioBuffer& in,

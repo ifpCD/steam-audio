@@ -72,6 +72,9 @@ PathEffect::PathEffect(const AudioSettings& audioSettings,
     , mSharedShape(false)
     , mNumFieldBlocks(0)
     , mAccumulateFieldHRTF(&PathEffect::accumulateFieldHRTF_float4)
+    , mConvolutionIRSize(0)
+    , mGroupDelayFirstBin(0)
+    , mGroupDelayLinearBin(0)
     , mBandSignals(Bands::kNumBands, audioSettings.frameSize)
     , mPrevGains(Bands::kNumBands, kMaxChannels)
 {
@@ -99,9 +102,15 @@ PathEffect::PathEffect(const AudioSettings& audioSettings,
     {
         mFieldFFT = ipl::make_unique<FFT>(effectSettings.hrtf->fieldIRSize());
 
+        // the fitted HRIR sits in [1/4, 5/8) of the field IR (fieldDelay() minus its lead-in, plus the HRIR length).
+        // crossover ringing and the restored group delay stay within 1/8 of it, and past 3/4 there is only crossover
+        // pre-ringing wrapped around from before t = 0 (below -60 dB). convolving 3/4 keeps it out of the output and
+        // drops the convolution FFT a size for frames like 512 (640 + 383 -> 1024 instead of 640 + 511 -> 2048).
+        mConvolutionIRSize = 3 * mFieldFFT->numRealSamples / 4;
+
         OverlapAddConvolutionEffectSettings convolutionSettings{};
         convolutionSettings.numChannels = IHRTFMap::kNumEars;
-        convolutionSettings.irSize = mFieldFFT->numRealSamples;
+        convolutionSettings.irSize = mConvolutionIRSize;
 
         mConvolution = ipl::make_unique<OverlapAddConvolutionEffect>(audioSettings, convolutionSettings);
         mConvolutionFFT = ipl::make_unique<FFT>(mConvolution->wetAudioSize());
@@ -114,8 +123,10 @@ PathEffect::PathEffect(const AudioSettings& audioSettings,
         mFieldHRTF.resize(IHRTFMap::kNumEars, mNumFieldBlocks * HRTFDatabase::kFieldBlockBins);
         mHRIR.resize(mConvolutionFFT->numRealSamples);
         mHRTF.resize(IHRTFMap::kNumEars, mConvolutionFFT->numComplexSamples);
+        mGroupDelayPhase.resize(mFieldFFT->numComplexSamples);
 
         buildCrossover();
+        buildGroupDelay();
     }
 
     reset();
@@ -157,7 +168,8 @@ AudioEffectState PathEffect::apply(const PathEffectParams& params,
 
     if (binaural)
     {
-        loadField(*params.field, &listenerRotation(*params.listener), true);
+        // no max-rE: the MagLS tables are fitted for the unweighted field
+        loadField(*params.field, &listenerRotation(*params.listener), false);
         mPrevBinaural = true;
         return applyBinaural(*params.hrtf, in, out);
     }
@@ -277,6 +289,204 @@ void PathEffect::buildCrossover()
     }
 }
 
+// Group delay d (samples) means phase -d * sum_{k' <= k} w(k') 2pi / N at bin k: continuous in frequency, with group
+// delay d * w(k) ramping from 0 at the MagLS cutoff to d half an octave above it.
+void PathEffect::buildGroupDelay()
+{
+    auto numBins = mFieldFFT->numComplexSamples;
+    auto binWidth = static_cast<float>(mSamplingRate) / mFieldFFT->numRealSamples;
+    auto step = 2.0f * Math::kPi / mFieldFFT->numRealSamples;
+    auto start = HRTFDatabase::kFieldMagnitudeCutoffMax;
+
+    auto phase = 0.0f;
+    mGroupDelayFirstBin = numBins;
+    mGroupDelayLinearBin = numBins;
+
+    for (auto bin = 0; bin < numBins; ++bin)
+    {
+        auto frequency = bin * binWidth;
+        auto weight = 0.0f;
+
+        if (frequency > start)
+        {
+            auto position = std::min(log2f(frequency / start) / kGroupDelayRampOctaves, 1.0f);
+            weight = (position >= 1.0f) ? 1.0f : 0.5f - 0.5f * cosf(Math::kPi * position);
+        }
+
+        if (weight > 0.0f && mGroupDelayFirstBin == numBins)
+            mGroupDelayFirstBin = bin;
+
+        if (weight >= 1.0f && mGroupDelayLinearBin == numBins)
+            mGroupDelayLinearBin = bin;
+
+        phase += step * weight;
+        mGroupDelayPhase[bin] = phase;
+    }
+
+    // per-band fields: each band speaks for the share of [cutoff, kGroupDelayBandHigh) its crossover passes
+    auto numWeighted = 0;
+    for (auto band = 0; band < Bands::kNumBands; ++band)
+    {
+        mGroupDelayBandWeights[band] = 0.0f;
+    }
+
+    for (auto bin = 0; bin < numBins; ++bin)
+    {
+        auto frequency = bin * binWidth;
+        if (frequency < start || frequency >= kGroupDelayBandHigh)
+            continue;
+
+        for (auto band = 0; band < Bands::kNumBands; ++band)
+        {
+            mGroupDelayBandWeights[band] += mCrossover[band][2 * bin];
+        }
+
+        ++numWeighted;
+    }
+
+    for (auto band = 0; band < Bands::kNumBands; ++band)
+    {
+        mGroupDelayBandWeights[band] /= std::max(numWeighted, 1);
+    }
+}
+
+void PathEffect::continueGroupDelay(const HRTFDatabase& hrtf)
+{
+    const auto kSqrtFourPi = 3.5449077f;
+
+    // arrival time per ear = integral(g tau) / integral(g) = (c . T) / (sqrt(4pi) c_00), over the bands that carry
+    // the frequencies the group delay is restored at
+    float numerator[IHRTFMap::kNumEars] = { 0.0f, 0.0f };
+    auto omni = 0.0f;
+    auto norm = 0.0f;
+
+    auto accumulate = [&](const float* coeffs, int order, float weight)
+    {
+        auto numCoeffs = std::min(SphericalHarmonics::numCoeffsForOrder(order), HRTFDatabase::kFieldDelayCoeffs);
+
+        for (auto ear = 0; ear < IHRTFMap::kNumEars; ++ear)
+        {
+            const auto* delays = hrtf.fieldDelayCoeffs(ear);
+            auto dot = 0.0f;
+
+            for (auto i = 0; i < numCoeffs; ++i)
+            {
+                dot += coeffs[i] * delays[i];
+            }
+
+            numerator[ear] += weight * dot;
+        }
+
+        auto sumSquares = 0.0f;
+        for (auto i = 0; i < numCoeffs; ++i)
+        {
+            sumSquares += coeffs[i] * coeffs[i];
+        }
+
+        omni += weight * coeffs[0];
+        norm += weight * sqrtf(sumSquares);
+    };
+
+    if (mSharedShape)
+    {
+        accumulate(mShape, mOrders[0], 1.0f);
+    }
+    else
+    {
+        for (auto band = 0; band < Bands::kNumBands; ++band)
+        {
+            if (mGroupDelayBandWeights[band] > 0.0f)
+            {
+                accumulate(mCoeffs[band], mOrders[band], mGroupDelayBandWeights[band]);
+            }
+        }
+    }
+
+    // a point source has c_00 / |c| = 1 / (order + 1) <= 0.2 over the first 25 coefficients, a field with any extent
+    // more. one whose omni term has (nearly) cancelled has no meaningful mean arrival: leave the shared delay.
+    if (!(omni > 0.05f * norm))
+        return;
+
+    auto numBins = mFieldFFT->numComplexSamples;
+    auto step = 2.0f * Math::kPi / mFieldFFT->numRealSamples;
+
+    for (auto ear = 0; ear < IHRTFMap::kNumEars; ++ear)
+    {
+        auto delay = numerator[ear] / (kSqrtFourPi * omni);
+        delay = std::min(std::max(delay, hrtf.fieldDelayMin(ear)), hrtf.fieldDelayMax(ear));
+
+        if (fabsf(delay) < 1e-3f)
+            continue;
+
+        auto* bins = reinterpret_cast<float*>(mFieldHRTF[ear]);
+
+        for (auto bin = mGroupDelayFirstBin; bin < mGroupDelayLinearBin; ++bin)
+        {
+            auto angle = -delay * mGroupDelayPhase[bin];
+            auto c = cosf(angle);
+            auto s = sinf(angle);
+            auto re = bins[2 * bin];
+            auto im = bins[2 * bin + 1];
+            bins[2 * bin] = re * c - im * s;
+            bins[2 * bin + 1] = re * s + im * c;
+        }
+
+        if (mGroupDelayLinearBin >= numBins)
+            continue;
+
+        // past the ramp the phase is linear in bin: rotate by running phasors, four independent chains (bins k + j,
+        // j < 4, each stepping 4 bins) so the recurrence pipelines instead of serializing on multiply latency.
+        // renormalized every 64 bins.
+        const auto kLanes = 4;
+        float zr[kLanes];
+        float zi[kLanes];
+
+        for (auto j = 0; j < kLanes; ++j)
+        {
+            auto angle = -delay * (mGroupDelayPhase[mGroupDelayLinearBin] + j * step);
+            zr[j] = cosf(angle);
+            zi[j] = sinf(angle);
+        }
+
+        auto dr = cosf(-delay * step * kLanes);
+        auto di = sinf(-delay * step * kLanes);
+        auto bin = mGroupDelayLinearBin;
+
+        for (auto count = 0; bin + kLanes <= numBins; bin += kLanes, ++count)
+        {
+            for (auto j = 0; j < kLanes; ++j)
+            {
+                auto re = bins[2 * (bin + j)];
+                auto im = bins[2 * (bin + j) + 1];
+                bins[2 * (bin + j)] = re * zr[j] - im * zi[j];
+                bins[2 * (bin + j) + 1] = re * zi[j] + im * zr[j];
+
+                auto nr = zr[j] * dr - zi[j] * di;
+                zi[j] = zr[j] * di + zi[j] * dr;
+                zr[j] = nr;
+            }
+
+            if ((count & 15) == 15)
+            {
+                for (auto j = 0; j < kLanes; ++j)
+                {
+                    auto scale = 1.0f / sqrtf(zr[j] * zr[j] + zi[j] * zi[j]);
+                    zr[j] *= scale;
+                    zi[j] *= scale;
+                }
+            }
+        }
+
+        for (auto j = 0; bin < numBins; ++bin, ++j)
+        {
+            auto re = bins[2 * bin];
+            auto im = bins[2 * bin + 1];
+            bins[2 * bin] = re * zr[j] - im * zi[j];
+            bins[2 * bin + 1] = re * zi[j] + im * zr[j];
+        }
+    }
+}
+
 AudioEffectState PathEffect::applyBinaural(const HRTFDatabase& hrtf,
                                            const AudioBuffer& in,
                                            AudioBuffer& out)
@@ -311,9 +521,12 @@ AudioEffectState PathEffect::applyBinaural(const HRTFDatabase& hrtf,
         }
     }
 
+    continueGroupDelay(hrtf);
+
     for (auto ear = 0; ear < IHRTFMap::kNumEars; ++ear)
     {
         mFieldFFT->applyInverse(mFieldHRTF[ear], mHRIR.data());
+        memset(mHRIR.data() + mConvolutionIRSize, 0, (mFieldFFT->numRealSamples - mConvolutionIRSize) * sizeof(float));
         mConvolutionFFT->applyForward(mHRIR.data(), mHRTF[ear]);
     }
 
